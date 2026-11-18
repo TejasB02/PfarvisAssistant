@@ -64,8 +64,17 @@ OLLAMA_TIMEOUT_SECONDS: int = _env_int("OLLAMA_TIMEOUT_SECONDS", 120)
 
 # --- Ingestion ---------------------------------------------------------------
 SUPPORTED_EXTENSIONS: tuple[str, ...] = (".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg")
-# Optional full path to the local tesseract binary (handy on Windows).
-TESSERACT_CMD: str | None = os.environ.get("TESSERACT_CMD") or None
+# Full path to the local tesseract binary. The TESSERACT_CMD env var wins;
+# otherwise the standard Windows install folders are checked (the installer
+# often does not add Tesseract to PATH). None -> pytesseract searches PATH.
+_TESSERACT_DEFAULTS = (
+    Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Tesseract-OCR" / "tesseract.exe",
+    Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "Tesseract-OCR" / "tesseract.exe",
+    Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Tesseract-OCR" / "tesseract.exe",
+)
+TESSERACT_CMD: str | None = os.environ.get("TESSERACT_CMD") or next(
+    (str(p) for p in _TESSERACT_DEFAULTS if p.is_file()), None
+)
 
 # --- Retrieval & guardrails ---------------------------------------------------
 RETRIEVAL_TOP_K: int = _env_int("RETRIEVAL_TOP_K", 5)
