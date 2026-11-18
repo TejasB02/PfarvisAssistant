@@ -12,120 +12,99 @@
 # =============================================================================
 """ChromaDB + local embeddings, hidden behind NotesStore."""
 
-from __future__ import annotations
+import os
+from typing import List, Dict, Any, Optional
 
-import logging
-from typing import Any, Optional
+def get_chroma_client(config):
+    import chromadb
+    from chromadb.config import Settings
+    return chromadb.PersistentClient(
+        path=config.CHROMA_DIR, 
+        settings=Settings(anonymized_telemetry=False)
+    )
 
-import config
-from contracts import note_from_dict, note_to_dict
+def get_embedding_model(config):
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer(config.EMBED_MODEL_PATH)
 
-log = logging.getLogger(__name__)
+def note_to_metadata(note: Dict[str, Any]) -> Dict[str, Any]:
+    """Converts note fields into Chroma-compatible scalar metadata."""
+    metadata = {}
+    for key, val in note.items():
+        if key == "content":
+            continue  # Content is stored in 'documents'
+        if isinstance(val, list):
+            # Store lists/tags as comma-joined strings for scalar compatibility
+            metadata[key] = ",".join(str(v) for v in val) if val else ""
+        elif val is not None:
+            metadata[key] = str(val)
+    return metadata
 
+def metadata_to_note(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Restores scalar metadata back into structured note fields."""
+    note = dict(metadata)
+    if "tags" in note and isinstance(note["tags"], str):
+        note["tags"] = [t.strip() for t in note["tags"].split(",") if t.strip()]
+    return note
 
-class VectorDB:
-    """Embeds notes locally and stores them in a persistent Chroma collection."""
+class VectorDBStore:
+    def __init__(self, config, custom_model=None):
+        self.config = config
+        self.client = get_chroma_client(config)
+        self.model = custom_model if custom_model else get_embedding_model(config)
+        
+        self.collection = self.client.get_or_create_collection(
+            name=config.CHROMA_COLLECTION,
+            embedding_function=None,
+            metadata={"hnsw:space": "cosine"}
+        )
 
-    def __init__(
-        self,
-        persist_dir: str = config.CHROMA_DIR,
-        model_path: str = config.EMBED_MODEL_PATH,
-    ) -> None:
-        """Remember settings; open Chroma and the model lazily on first use.
+    def upsert(self, note_id: str, content: str, note_data: Dict[str, Any]):
+        """Encodes note content locally and upserts vectors into ChromaDB."""
+        embedding = self.model.encode([content], normalize_embeddings=True)[0].tolist()
+        metadata = note_to_metadata(note_data)
+        metadata["note_id"] = note_id
 
-        Edge cases:
-            - model_path missing -> raise a clear error telling the user to run
-              scripts/prefetch_models.py (never fall back to a hub download).
-        """
-        # TODO(person 2): open lazily in _collection() / _embedder():
-        #   import chromadb
-        #   from chromadb.config import Settings
-        #   client = chromadb.PersistentClient(path=self.persist_dir,
-        #                                      settings=Settings(anonymized_telemetry=False))
-        #   self._coll = client.get_or_create_collection(
-        #       name=config.CHROMA_COLLECTION, embedding_function=None,
-        #       metadata={"hnsw:space": "cosine"})
-        #   from sentence_transformers import SentenceTransformer
-        #   self._model = SentenceTransformer(self.model_path, device="cpu")
-        # Verify on your installed chromadb version that no model download is
-        # triggered (run once with Wi-Fi off).
-        self.persist_dir = persist_dir
-        self.model_path = model_path
-        self._mock_ids: list[str] = []
+        self.collection.upsert(
+            ids=[note_id],
+            documents=[content],
+            embeddings=[embedding],
+            metadatas=[metadata]
+        )
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        """Return one normalised embedding per text (384 floats for MiniLM).
+    def delete(self, note_id: str):
+        """Removes note embeddings from ChromaDB."""
+        try:
+            self.collection.delete(ids=[note_id])
+        except Exception:
+            pass
 
-        Edge cases: empty list -> []; empty strings still get a vector.
-        """
-        # TODO(person 2): self._embedder().encode(texts, normalize_embeddings=True).tolist()
-        return [[0.0] * 384 for _ in texts]
-
-    def upsert(self, notes: list[dict]) -> None:
-        """Embed ``title + content`` of each note and upsert it into Chroma.
-
-        Uses ``ids=[note["id"]]``, ``documents=[content]``,
-        ``embeddings=self.embed(...)`` and ``metadatas=[note_to_metadata(note)]``.
-        Edge cases: empty list -> no-op; re-adding the same id overwrites it.
-        """
-        # TODO(person 2): real Chroma upsert with our own embeddings.
-        for note in notes:
-            if note["id"] not in self._mock_ids:
-                self._mock_ids.append(note["id"])
-
-    def search(self, query: str, k: int = 5) -> list[tuple[str, float]]:
-        """Return up to ``k`` (note_id, similarity) pairs, best first.
-
-        Use ``query_embeddings=self.embed([query])`` (never ``query_texts``,
-        which would invoke an embedding function). With cosine space,
-        similarity = 1 - distance, clamped to 0..1.
-        Edge cases: empty collection or blank query -> [].
-        """
-        # TODO(person 2): real Chroma query. Mock: first k ids, decreasing scores.
-        if not query.strip():
-            return []
-        return [(note_id, round(max(0.0, 0.9 - 0.05 * i), 2))
-                for i, note_id in enumerate(self._mock_ids[:k])]
-
-    def delete(self, note_id: str) -> None:
-        """Remove a note's vector. Unknown id -> no-op."""
-        # TODO(person 2): self._collection().delete(ids=[note_id])
-        if note_id in self._mock_ids:
-            self._mock_ids.remove(note_id)
-
-
-def note_to_metadata(note: dict) -> dict[str, Any]:
-    """Flatten a note dict into Chroma-safe scalar metadata.
-
-    Datetimes -> ISO strings, tags -> comma-joined string, None -> "".
-    ``content`` is stored as the Chroma document, not in metadata.
-    """
-    # TODO(person 2): decide how to handle commas inside tags (extract.py
-    # produces [\w-] tags, so none are expected today).
-    def iso(value: Any) -> str:
-        return value.isoformat() if value is not None else ""
-
-    return {
-        "title": note["title"],
-        "filepath": note["filepath"],
-        "timestamp": iso(note.get("timestamp")),
-        "client": note.get("client") or "",
-        "tags": ",".join(note.get("tags") or []),
-        "event_time": iso(note.get("event_time")),
-    }
-
-
-def metadata_to_note(note_id: str, document: str, metadata: dict[str, Any]) -> dict:
-    """Inverse of note_to_metadata: rebuild the contract note dict."""
-    # TODO(person 2): keep in sync with note_to_metadata.
-    tags_raw: Optional[str] = metadata.get("tags") or ""
-    return note_to_dict(note_from_dict({
-        "id": note_id,
-        "title": metadata.get("title", ""),
-        "content": document or "",
-        "filepath": metadata.get("filepath", ""),
-        "timestamp": metadata.get("timestamp") or None,
-        "client": metadata.get("client") or None,
-        "tags": [t for t in tags_raw.split(",") if t],
-        "event_time": metadata.get("event_time") or None,
-    }))
+    def query(self, query_text: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Queries the vector database using explicit query embeddings with clamped similarity scores."""
+        query_embedding = self.model.encode([query_text], normalize_embeddings=True)[0].tolist()
+        
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=k
+        )
+        
+        formatted = []
+        if results and results['ids'] and len(results['ids'][0]) > 0:
+            ids = results['ids'][0]
+            documents = results['documents'][0]
+            metadatas = results['metadatas'][0]
+            distances = results['distances'][0] if 'distances' in results and results['distances'] else [0.0] * len(ids)
+            
+            for i in range(len(ids)):
+                distance = distances[i] if i < len(distances) else 0.0
+                # Similarity = 1 - cosine distance, clamped to 0..1
+                similarity = max(0.0, min(1.0, 1.0 - distance))
+                
+                formatted.append({
+                    "id": ids[i],
+                    "content": documents[i],
+                    "metadata": metadatas[i],
+                    "score": similarity,
+                    "via": "vector"
+                })
+        return formatted
