@@ -9,54 +9,68 @@
 # =============================================================================
 """Links related notes: same client or any shared tag."""
 
-from __future__ import annotations
-
-import logging
-from typing import Optional
-
-log = logging.getLogger(__name__)
-
+from typing import Dict, Any, List
 
 class KnowledgeGraph:
-    """Undirected graph: one node per note id, edges between related notes.
+    def __init__(self):
+        import networkx as nx
+        self.graph = nx.Graph()
 
-    Edge rule: two notes are linked when they share the same (non-None) client
-    or ANY tag. Every edge carries a "reason" attribute, e.g.
-    "client:Quillmont Systems" or "tag:q3-rollout" (joined with "; " when
-    several reasons apply).
-    """
+    def add_note(self, note_id: str, metadata: Dict[str, Any], notes_store: Dict[str, Dict[str, Any]]):
+        """Adds a note node and builds edges with other notes sharing clients or tags."""
+        self.graph.add_node(note_id, **metadata)
+        
+        client = metadata.get("client")
+        tags_raw = metadata.get("tags", [])
+        tags = [t.strip() for t in tags_raw.split(",")] if isinstance(tags_raw, str) else tags_raw
 
-    def __init__(self) -> None:
-        # TODO(person 2): import networkx inside __init__ and create nx.Graph().
-        self._node_ids: set[str] = set()
+        # Compare with all other loaded notes to establish relational edges
+        for other_id, other_data in notes_store.items():
+            if other_id == note_id:
+                continue
+            
+            other_client = other_data.get("client")
+            other_tags_raw = other_data.get("tags", [])
+            other_tags = [t.strip() for t in other_tags_raw.split(",")] if isinstance(other_tags_raw, str) else other_tags_raw
 
-    def add_notes(self, notes: list[dict]) -> None:
-        """Add/refresh nodes for ``notes`` and (re)compute their edges.
+            # Edge condition 1: Shared client
+            if client and other_client and client == other_client:
+                self.graph.add_edge(note_id, other_id, reason=f"client:{client}")
 
-        Store client and tags as node attributes. Re-adding a note replaces its
-        old edges (its tags may have changed).
-        Edge cases: empty list -> no-op; notes with no client and no tags become
-        isolated nodes.
-        """
-        # TODO(person 2): build nodes and "reason"-labelled edges.
-        self._node_ids.update(note["id"] for note in notes)
+            # Edge condition 2: Shared tags
+            shared_tags = set(tags).intersection(set(other_tags))
+            for tag in shared_tags:
+                if tag:
+                    self.graph.add_edge(note_id, other_id, reason=f"tag:{tag}")
 
-    def neighbours(self, note_id: str, hops: int = 1) -> list[str]:
-        """Return ids within ``hops`` edges of ``note_id`` (excluding itself).
+    def remove_note(self, note_id: str):
+        """Removes a note node from the graph."""
+        if self.graph.has_node(note_id):
+            self.graph.remove_node(note_id)
 
-        Order: closest first, then by number of shared reasons.
-        Edge cases: unknown id or hops <= 0 -> []. Consider capping the result
-        (e.g. 5) so one popular tag does not flood the LLM context.
-        """
-        # TODO(person 2): nx.single_source_shortest_path_length(G, note_id, cutoff=hops)
-        return []
+    def get_neighbors(self, seed_ids: List[str], hops: int) -> List[Dict[str, Any]]:
+        """Traverses the graph up to `hops` away from seed notes, returning neighbor metadata and reasons."""
+        current_layer = set(seed_ids)
+        visited = set(seed_ids)
+        neighbors_meta = []
 
-    def edge_reason(self, a: str, b: str) -> Optional[str]:
-        """Return the "reason" attribute of edge a-b, or None if not linked."""
-        # TODO(person 2): G.edges[a, b]["reason"] if G.has_edge(a, b) else None
-        return None
-
-    def remove(self, note_id: str) -> None:
-        """Remove a node and its edges. Unknown id -> no-op."""
-        # TODO(person 2): G.remove_node(note_id) if present
-        self._node_ids.discard(note_id)
+        for _ in range(hops):
+            next_layer = set()
+            for node in current_layer:
+                if self.graph.has_node(node):
+                    for neighbor in self.graph.neighbors(node):
+                        if neighbor not in visited:
+                            visited.add(neighbor)
+                            next_layer.add(neighbor)
+                            
+                            # Retrieve edge reason attribute
+                            edge_data = self.graph.get_edge_data(node, neighbor)
+                            reason = edge_data.get("reason", "linked") if edge_data else "linked"
+                            
+                            neighbors_meta.append({
+                                "id": neighbor,
+                                "parent_id": node,
+                                "reason": reason
+                            })
+            current_layer = next_layer
+        return neighbors_meta

@@ -7,3 +7,7 @@
 #            local sentence-transformers), knowledge_graph.py (NetworkX links).
 # =============================================================================
 """Storage package: local vector search plus a knowledge graph of related notes."""
+
+from .store import NotesStore
+
+__all__ = ["NotesStore"]

@@ -8,133 +8,82 @@
 # =============================================================================
 """NotesStore: the single public storage API used by the rest of the app."""
 
-from __future__ import annotations
-
-import logging
-import threading
-from typing import Optional
-
-import config
-from contracts import ContextItem
-from module_storage.knowledge_graph import KnowledgeGraph
-from module_storage.vector_db import VectorDB
-
-log = logging.getLogger(__name__)
-
-# Graph neighbours inherit their parent's score times this factor, so they rank
-# below direct semantic hits and never decide has_enough_context on their own.
-GRAPH_SCORE_DECAY = 0.8
-
+from typing import List, Dict, Any, Optional
+from .vector_db import VectorDBStore
+from .knowledge_graph import KnowledgeGraph
 
 class NotesStore:
-    """Hybrid store: semantic search in Chroma + related notes from the graph.
+    def __init__(self, config, custom_embedder=None):
+        self.config = config
+        self.vector_store = VectorDBStore(config, custom_model=custom_embedder)
+        self.graph = KnowledgeGraph()
+        self._notes_cache: Dict[str, Dict[str, Any]] = {}
 
-    Thread-safety: the reminder scheduler calls all_notes() from a background
-    thread, so reads and writes of the in-memory note map hold a lock.
-    """
+    def add(self, note_id: str, content: str, metadata: Dict[str, Any]):
+        """Adds or updates a note across vector DB, graph, and local cache."""
+        full_record = {"id": note_id, "content": content, **metadata}
+        self._notes_cache[note_id] = full_record
+        
+        # Upsert into vector database
+        self.vector_store.upsert(note_id, content, metadata)
+        
+        # Update knowledge graph relationships
+        self.graph.add_note(note_id, metadata, self._notes_cache)
 
-    def __init__(
-        self,
-        persist_dir: str = config.CHROMA_DIR,
-        model_path: str = config.EMBED_MODEL_PATH,
-    ) -> None:
-        # TODO(person 2): on startup, decide whether to reload notes from Chroma
-        # (persisted) or rely on app.py re-adding them every launch.
-        self._notes: dict[str, dict] = {}
-        self._lock = threading.RLock()
-        self._vectors = VectorDB(persist_dir=persist_dir, model_path=model_path)
-        self._graph = KnowledgeGraph()
+    def remove(self, note_id: str):
+        """Removes a note from the store components."""
+        if note_id in self._notes_cache:
+            del self._notes_cache[note_id]
+        self.vector_store.delete(note_id)
+        self.graph.remove_node(note_id)
 
-    def add(self, notes: list[dict]) -> None:
-        """Embed and upsert notes into Chroma, add graph nodes and edges.
+    def get_note(self, note_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves a single note record by ID."""
+        return self._notes_cache.get(note_id)
 
-        Inputs:
-            notes: note dicts (asdict(NoteItem)) from Person 1.
-        Output: None.
-        Behaviour:
-            - Upsert by ``id`` (re-adding a file replaces the old version).
-            - Edges between notes sharing the same client or any tag, with an
-              edge attribute "reason".
-        Edge cases: empty list -> no-op; a dict missing contract keys -> log and
-        skip that note rather than failing the whole batch.
+    def all_notes(self) -> List[Dict[str, Any]]:
+        """Returns all stored notes."""
+        return list(self._notes_cache.values())
+
+    def query(self, query_text: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Performs pure semantic vector search."""
+        return self.vector_store.query(query_text, k=k)
+
+    def hybrid_search(self, query: str, k: int = 5, hops: int = 1) -> List[Dict[str, Any]]:
         """
-        # TODO(person 2): validate each dict, batch the embeddings.
-        if not notes:
-            return
-        with self._lock:
-            for note in notes:
-                self._notes[note["id"]] = dict(note)
-        self._vectors.upsert(notes)
-        self._graph.add_notes(notes)
-
-    def query(self, text: str, k: int = 5) -> list[ContextItem]:
-        """Alias for ``hybrid_search(text, k=k, hops=config.GRAPH_HOPS)``."""
-        # TODO(person 2): keep as a thin alias.
-        return self.hybrid_search(text, k=k, hops=config.GRAPH_HOPS)
-
-    def hybrid_search(self, query: str, k: int = 5, hops: int = 1) -> list[ContextItem]:
-        """Semantic matches plus graph neighbours of those matches.
-
-        Inputs:
-            query: standalone question (already rewritten by Person 3).
-            k: number of semantic hits.
-            hops: graph distance for neighbours (0 = semantic only).
-        Output:
-            list[ContextItem], de-duplicated by note, semantic results first
-            (best score first), then graph neighbours (score =
-            parent score * GRAPH_SCORE_DECAY, via="graph").
-        Edge cases: blank query or empty store -> []. Scores are 0..1.
+        Combines vector similarity and graph traversal:
+        Returns semantic hits first, followed by graph neighbors within hops,
+        scored by parent score times GRAPH_SCORE_DECAY.
         """
-        # TODO(person 2): this orchestration is fine to keep; make VectorDB.search
-        # and KnowledgeGraph.neighbours real underneath it.
-        if not query.strip():
-            return []
-        hits = self._vectors.search(query, k=k)
-        results: list[ContextItem] = []
-        seen: set[str] = set()
-        for note_id, score in hits:
-            note = self.get_note(note_id)
-            if note is None or note_id in seen:
-                continue
-            results.append(_to_context(note, score, "semantic"))
-            seen.add(note_id)
-        if hops > 0:
-            for note_id, score in hits:
-                for neighbour_id in self._graph.neighbours(note_id, hops=hops):
-                    neighbour = self.get_note(neighbour_id)
-                    if neighbour is None or neighbour_id in seen:
-                        continue
-                    results.append(_to_context(neighbour, score * GRAPH_SCORE_DECAY, "graph"))
-                    seen.add(neighbour_id)
+        # 1. Get initial semantic hits
+        semantic_hits = self.vector_store.query(query, k=k)
+        
+        results = list(semantic_hits)
+        seen_ids = {hit["id"] for hit in semantic_hits}
+        seed_ids = list(seen_ids)
+
+        # 2. Get graph neighbors within hops
+        graph_neighbors = self.graph.get_neighbors(seed_ids, hops=hops)
+        
+        decay = getattr(self.config, "GRAPH_SCORE_DECAY", 0.7)
+        score_map = {hit["id"]: hit["score"] for hit in semantic_hits}
+
+        for neighbor in graph_neighbors:
+            n_id = neighbor["id"]
+            if n_id not in seen_ids and n_id in self._notes_cache:
+                seen_ids.add(n_id)
+                parent_id = neighbor["parent_id"]
+                parent_score = score_map.get(parent_id, 0.5)
+                decayed_score = parent_score * decay
+
+                note_record = self._notes_cache[n_id]
+                results.append({
+                    "id": n_id,
+                    "content": note_record.get("content", ""),
+                    "metadata": {k: v for k, v in note_record.items() if k != "content"},
+                    "score": decayed_score,
+                    "via": "graph",
+                    "reason": neighbor["reason"]
+                })
+
         return results
-
-    def get_note(self, note_id: str) -> Optional[dict]:
-        """Return the note dict for ``note_id``, or None if unknown."""
-        # TODO(person 2): fall back to Chroma (metadata_to_note) if not cached.
-        with self._lock:
-            note = self._notes.get(note_id)
-            return dict(note) if note is not None else None
-
-    def all_notes(self) -> list[dict]:
-        """Return a snapshot list of every stored note dict (any order)."""
-        # TODO(person 2): keep this cheap; the scheduler calls it every 30 s.
-        with self._lock:
-            return [dict(n) for n in self._notes.values()]
-
-    def remove(self, note_id: str) -> None:
-        """Delete a note from Chroma, the graph and the cache. Unknown id -> no-op."""
-        # TODO(person 2): make sure Chroma and the graph stay in sync.
-        with self._lock:
-            self._notes.pop(note_id, None)
-        self._vectors.delete(note_id)
-        self._graph.remove(note_id)
-
-
-def _to_context(note: dict, score: float, via: str) -> ContextItem:
-    return ContextItem(
-        filepath=note["filepath"],
-        title=note["title"],
-        content=note["content"],
-        score=max(0.0, min(1.0, float(score))),
-        via=via,  # type: ignore[typeddict-item]
-    )
