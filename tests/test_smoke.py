@@ -4,6 +4,7 @@ nothing points off the machine, and the Streamlit app runs end to end."""
 import ast
 import importlib
 import inspect
+import os
 import re
 import subprocess
 import sys
@@ -64,6 +65,12 @@ DEFAULTS = {
 
 HEAVY = ["chromadb", "sentence_transformers", "ollama", "pypdf", "docx", "pytesseract",
          "PIL", "apscheduler", "plyer", "watchdog", "networkx", "dateparser"]
+
+
+def _fake_chat(messages, temperature=0.0):
+    """Stand-in for llm_client.chat: cites the first SOURCE in the prompt."""
+    match = re.search(r"^SOURCE \[([^\]\n]+)\]", messages[-1]["content"], flags=re.MULTILINE)
+    return f"Mock answer [{match.group(1)}]." if match else "I couldn't find that in your notes."
 
 
 def _resolve(module_name: str, attr_path: str):
@@ -135,8 +142,10 @@ def test_scan_and_parse_missing_folder_returns_empty(tmp_path):
 def test_pipeline_end_to_end_with_stubs(monkeypatch):
     from module_ingest.parser import scan_and_parse
     from module_rag import pipeline
+    from module_rag import llm_client
     from module_storage.store import NotesStore
 
+    monkeypatch.setattr(llm_client, "chat", _fake_chat)  # no real model in default tests
     monkeypatch.chdir(ROOT)
     store = NotesStore()
     store.add(scan_and_parse("sample_notes"))
@@ -179,13 +188,22 @@ ALLOWED_HOSTS = {"127.0.0.1", "localhost"}
 URL_RE = re.compile(r"https?://([^/\s:'\"<>)\]`]+)")
 
 
+def _project_files():
+    """Walk the repo, pruning caches, data, models and ANY virtualenv folder."""
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in SKIP_DIRS and not (Path(dirpath, d) / "pyvenv.cfg").exists()
+        ]
+        for name in filenames:
+            yield Path(dirpath, name)
+
+
 def test_no_remote_urls_in_project_files():
     exempt = ROOT / "scripts" / "prefetch_models.py"
     offenders = []
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or path == exempt:
-            continue
-        if any(part in SKIP_DIRS for part in path.relative_to(ROOT).parts):
+    for path in _project_files():
+        if path == exempt:
             continue
         raw = path.read_bytes()
         if b"\x00" in raw:  # binary (e.g. the sample PNG)
@@ -200,9 +218,11 @@ def test_no_remote_urls_in_project_files():
 def test_streamlit_app_runs_end_to_end(monkeypatch):
     from streamlit.testing.v1 import AppTest
 
+    from module_rag import llm_client
     from module_ui import notifier
 
     monkeypatch.setattr(notifier, "notify_desktop", lambda title, message: None)
+    monkeypatch.setattr(llm_client, "chat", _fake_chat)  # no real model in default tests
     monkeypatch.chdir(ROOT)
     at = AppTest.from_file(str(ROOT / "app.py"), default_timeout=60)
     at.run()

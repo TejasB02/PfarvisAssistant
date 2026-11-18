@@ -6,7 +6,6 @@
 #            for answers.
 # Flow     : rewrite_query -> store.hybrid_search -> add pinned notes ->
 #            engine.answer_user_query
-# STATUS   : flow is REAL glue; rewrite_query is a pass-through stub.
 # =============================================================================
 """End-to-end question answering used by the UI."""
 
@@ -16,10 +15,21 @@ import logging
 
 import config
 from contracts import AnswerDict, ContextItem, fallback_answer
-from module_rag import engine
+from module_rag import engine, llm_client
 from module_storage.store import NotesStore
 
 log = logging.getLogger(__name__)
+
+REWRITE_HISTORY_MESSAGES = 6
+REWRITE_CHARS_PER_MESSAGE = 600
+
+REWRITE_PROMPT = """You rewrite the user's latest message as ONE standalone question that can be used to search their notes.
+Use only names and details that appear in the conversation. Do not answer the question. Do not add anything new.
+If the latest message is already a standalone question, return it unchanged.
+Reply with the question only, on a single line.
+
+Example: after a conversation about the 4pm call today, "Which client?" becomes:
+Which client is the 4pm call today with?"""
 
 
 def rewrite_query(query: str, chat_history: list[dict[str, str]]) -> str:
@@ -35,12 +45,33 @@ def rewrite_query(query: str, chat_history: list[dict[str, str]]) -> str:
         sees the original query plus history).
     Edge cases:
         - Empty history -> return ``query`` unchanged (no LLM call).
-        - LLM unavailable or returns junk/empty -> return ``query`` unchanged.
-        - Must never add facts that are not in the history.
+        - LLM error, empty reply, or a reply longer than 3x the query + 200
+          characters -> return ``query`` unchanged.
     """
-    # TODO(person 3): use llm_client.chat with a short rewrite prompt at
-    # temperature 0 when chat_history is not empty.
-    return query
+    if not chat_history or not query.strip():
+        return query
+
+    transcript = "\n".join(
+        f"{m['role'].upper()}: {m['content'][:REWRITE_CHARS_PER_MESSAGE]}"
+        for m in chat_history[-REWRITE_HISTORY_MESSAGES:]
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    )
+    messages = [
+        {"role": "system", "content": REWRITE_PROMPT},
+        {"role": "user", "content": f"Conversation:\n{transcript}\n\nLatest message: {query}\n\nStandalone question:"},
+    ]
+    try:
+        reply = llm_client.chat(messages, temperature=0.0)
+    except Exception as exc:  # noqa: BLE001 - a failed rewrite must not break answering
+        log.warning("rewrite_query: LLM call failed (%s); using the original query", exc)
+        return query
+
+    rewritten = _clean_rewrite(reply)
+    if not rewritten or len(rewritten) > 3 * len(query) + 200:
+        log.info("rewrite_query: unusable rewrite %r; keeping %r", (reply or "")[:200], query)
+        return query
+    log.info("rewrite_query: %r -> %r", query, rewritten)
+    return rewritten
 
 
 def ask(
@@ -63,9 +94,9 @@ def ask(
         - Blank query -> fallback without retrieval.
         - Pinned ids that no longer exist are ignored.
         - Pinned notes are appended after search results, de-duplicated by
-          filepath, with score 1.0 (the user chose them) and via="graph".
+          filepath, with score 0.0 and via="graph": they reach the prompt but
+          cannot pass has_enough_context on their own.
     """
-    # TODO(person 3): keep this flow; tune k/hops via config.
     if not query or not query.strip():
         return fallback_answer()
 
@@ -73,15 +104,33 @@ def ask(
     context: list[ContextItem] = list(
         store.hybrid_search(standalone, k=config.RETRIEVAL_TOP_K, hops=config.GRAPH_HOPS)
     )
+    best = max((c["score"] for c in context if c["via"] == "semantic"), default=0.0)
+    log.info("ask: best semantic score %.3f for %r (MIN_SIMILARITY=%.2f)",
+             best, standalone, config.MIN_SIMILARITY)
+
     seen = {item["filepath"] for item in context}
     for note_id in pinned_note_ids or []:
         note = store.get_note(note_id)
         if note is None or note["filepath"] in seen:
             continue
+        # pinned notes: score 0.0 so they never open the gate
         context.append(ContextItem(
             filepath=note["filepath"], title=note["title"], content=note["content"],
-            score=1.0, via="graph",
+            score=0.0, via="graph",
         ))
         seen.add(note["filepath"])
 
     return engine.answer_user_query(query, context, chat_history)
+
+
+def _clean_rewrite(reply: str) -> str:
+    """First non-empty line, without labels or surrounding quotes."""
+    for line in (reply or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for label in ("standalone question:", "question:", "rewritten:"):
+            if line.lower().startswith(label):
+                line = line[len(label):].strip()
+        return line.strip("\"'` ")
+    return ""

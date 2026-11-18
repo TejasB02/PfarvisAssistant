@@ -1,6 +1,6 @@
-# Virtual environments
-.venv/
-venv/
+# Virtual environments (any name, e.g. .venv, .venv-1, venv)
+.venv*/
+venv*/
 
 # Python
 __pycache__/
