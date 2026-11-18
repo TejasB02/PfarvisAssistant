@@ -114,7 +114,6 @@ def check_due_reminders(
 def build_reminder(note: dict, event_time: datetime, now: datetime) -> dict:
     """Reminder dict consumed by ui_app: note_id, title, filepath, filename,
     event_time, message, content."""
-    # TODO(person 4): keep these keys stable; ui_app.inject_reminder reads them.
     if event_time.date() == now.date():
         when = f"today at {event_time:%H:%M}"
     elif event_time.date() == (now + timedelta(days=1)).date():

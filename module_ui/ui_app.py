@@ -1,16 +1,4 @@
-# =============================================================================
-# module_ui/ui_app.py - owner: Person 4 (Frontend, State & Notifications)
-# Receives : NotesStore (Person 2) and note dicts (Person 1) from app.py;
-#            AnswerDicts from Person 3 via pipeline.ask; reminder dicts from
-#            notifier.pop_pending_reminders.
-# Hands off: user questions + chat history + pinned note ids -> pipeline.ask
-#            (Person 3); the rendered page -> the manager.
-# Session  : st.session_state["messages"]         chat history (+ sources)
-#            st.session_state["pinned_note_ids"]  passed to pipeline.ask
-#            st.session_state["active_reminders"] reminder cards on screen
-# STATUS   : basic working layout so the app runs end to end; polish it.
-# =============================================================================
-"""Streamlit page: chat, notes sidebar, reminder cards."""
+"""Notes sidebar and reminder panel for Pfarvis Assistant."""
 
 from __future__ import annotations
 
@@ -22,7 +10,7 @@ from typing import Optional
 import streamlit as st
 
 import config
-from module_rag import llm_client, pipeline
+from module_rag import llm_client
 from module_storage.store import NotesStore
 from module_ui import notifier
 
@@ -31,88 +19,22 @@ NO_CLIENT_LABEL = "No client"
 
 
 def main(store: NotesStore, notes: list[dict]) -> None:
-    """Render the whole page. Called by app.py on every Streamlit rerun.
+    """Render Pfarvis Assistant with the supplied note store and sidebar notes."""
+    from module_ui.rag_app import render
 
-    Inputs:
-        store: the shared NotesStore (cached by app.py).
-        notes: note dicts from scan_and_parse (cached by app.py).
-    Output: None (renders UI).
-    Edge cases: no notes -> sidebar says so, chat still works (fallback answers).
-    """
-    # TODO(person 4): polish layout, empty states, auto-pin top source of a
-    # grounded answer, streaming answers.
-    init_session_state()
-    render_sidebar(store, notes)
-    st.title("Local Notes Assistant")
-    st.caption("Answers come only from your notes. Everything stays on this machine.")
-    reminder_panel()
-    render_chat(store)
+    render(store, notes)
 
 
 def init_session_state() -> None:
     """Create the session keys this page relies on (idempotent)."""
-    # TODO(person 4): keep keys in sync with the header comment.
-    st.session_state.setdefault("messages", [])
     st.session_state.setdefault("pinned_note_ids", [])
     st.session_state.setdefault("active_reminders", [])
-
-
-# --- Chat ----------------------------------------------------------------------
-
-def render_chat(store: NotesStore) -> None:
-    """Show history, read st.chat_input, call pipeline.ask, store the reply."""
-    # TODO(person 4): show a "not found" style for grounded=False answers.
-    for message in st.session_state["messages"]:
-        render_message(message)
-
-    prompt = st.chat_input("Ask about your notes, e.g. 'When is my client call?'")
-    if not prompt:
-        return
-
-    history = [{"role": m["role"], "content": m["content"]} for m in st.session_state["messages"]]
-    user_msg = {"role": "user", "content": prompt, "sources": []}
-    st.session_state["messages"].append(user_msg)
-    render_message(user_msg)
-
-    with st.chat_message("assistant"):
-        with st.spinner("Searching your notes..."):
-            result = pipeline.ask(
-                prompt, history, store,
-                pinned_note_ids=list(st.session_state["pinned_note_ids"]),
-            )
-        st.markdown(result["answer"])
-        render_sources(result["sources"])
-    st.session_state["messages"].append({
-        "role": "assistant",
-        "content": result["answer"],
-        "sources": list(result["sources"]),
-        "grounded": result["grounded"],
-    })
-
-
-def render_message(message: dict) -> None:
-    """Render one chat message; assistant messages get a sources expander."""
-    # TODO(person 4): style reminder messages differently from answers.
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-        if message["role"] == "assistant":
-            render_sources(message.get("sources") or [])
-
-
-def render_sources(sources: list[str]) -> None:
-    """Small expander listing the source filepaths of an answer."""
-    # TODO(person 4): show paths relative to NOTE_DIR (display_folder) for readability.
-    if not sources:
-        return
-    with st.expander(f"Sources ({len(sources)})", expanded=False):
-        for source in sources:
-            st.caption(f"`{source}`")
 
 
 # --- Reminders -----------------------------------------------------------------
 
 @st.fragment(run_every=REMINDER_POLL_SECONDS)
-def reminder_panel(on_add: Callable[[dict], None] | None = None) -> None:
+def reminder_panel(on_add: Callable[[dict], None]) -> None:
     """Poll the notifier queue, toast new reminders, show cards with "Add to chat".
 
     Runs as a fragment so only this block reruns every few seconds.
@@ -128,28 +50,12 @@ def reminder_panel(on_add: Callable[[dict], None] | None = None) -> None:
             st.caption(reminder["filename"])
             add_col, dismiss_col = st.columns(2)
             if add_col.button("Add to chat", key=f"rem_add_{reminder['note_id']}"):
-                if on_add is None:
-                    inject_reminder(reminder)
-                else:
-                    on_add(reminder)
-                    _drop_reminder(reminder["note_id"])
+                on_add(reminder)
+                _drop_reminder(reminder["note_id"])
                 st.rerun()  # full rerun so the chat shows the new message
             if dismiss_col.button("Dismiss", key=f"rem_dismiss_{reminder['note_id']}"):
                 _drop_reminder(reminder["note_id"])
                 st.rerun()
-
-
-def inject_reminder(reminder: dict) -> None:
-    """Append "Reminder: <title> [<filename>]" + note content as an assistant
-    message, pin the note so follow-ups are about it, and remove the card."""
-    # TODO(person 4): keep the message format; Person 3's prompt relies on it.
-    content = f"Reminder: {reminder['title']} [{reminder['filename']}]\n\n{reminder['content']}"
-    st.session_state["messages"].append({
-        "role": "assistant", "content": content,
-        "sources": [reminder["filepath"]], "grounded": True,
-    })
-    pin_note(reminder["note_id"])
-    _drop_reminder(reminder["note_id"])
 
 
 def _drop_reminder(note_id: str) -> None:
