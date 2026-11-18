@@ -74,6 +74,7 @@ def chat(messages: list[dict[str, str]], temperature: float = 0.0) -> str:
         model=config.OLLAMA_MODEL,
         messages=messages,
         options={"temperature": temperature, "seed": 42},
+        **({"think": False} if config.OLLAMA_MODEL.split(":", 1)[0] == "gemma4" else {}),
     )
     message = _field(response, "message")
     content = _field(message, "content") or ""

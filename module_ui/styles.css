@@ -94,15 +94,13 @@
     text-align: left;
 }
 
-.stApp [class*="st-key-delete-chat-"] .stButton button,
-.stApp .st-key-voice-input .stButton button {
+.stApp [class*="st-key-delete-chat-"] .stButton button {
     min-width: 2.5rem;
     justify-content: center;
     padding-inline: 0.5rem;
 }
 
-.stApp [class*="st-key-delete-chat-"] button p,
-.stApp .st-key-voice-input button p {
+.stApp [class*="st-key-delete-chat-"] button p {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -143,7 +141,7 @@
     color: var(--chat-muted);
 }
 
-.stApp :is(.st-key-voice-input, [class*="st-key-delete-chat-"]) button {
+.stApp [class*="st-key-delete-chat-"] button {
     min-width: 2.5rem;
     justify-content: center;
     padding-inline: 0.5rem;
@@ -152,13 +150,13 @@
     color: var(--chat-accent) !important;
 }
 
-.stApp :is(.st-key-voice-input, [class*="st-key-delete-chat-"])
+.stApp [class*="st-key-delete-chat-"]
     button:is(:hover, :focus-visible) {
     background: var(--chat-control-hover) !important;
     border-color: var(--chat-accent) !important;
 }
 
-.stApp :is(.st-key-voice-input, [class*="st-key-delete-chat-"])
+.stApp [class*="st-key-delete-chat-"]
     button [data-testid="stIconMaterial"] {
     color: inherit !important;
 }

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 
 import streamlit as st
 
-import contracts
-from module_ui.chat_service import ChatService, Message, MockChatService
+from module_ui.chat_service import ChatService, Message
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -50,8 +52,7 @@ def add_messages(*messages: Message) -> None:
 def main(
     service: ChatService,
     *,
-    status: str = "Mock mode",
-    supports_filters: bool = True,
+    status: str,
     render_notes: Callable[[], None] | None = None,
     render_reminders: Callable[[], None] | None = None,
 ) -> None:
@@ -65,7 +66,6 @@ def main(
 
     conversations: list[Conversation] = st.session_state.conversations
     active_index = st.session_state.active_chat
-    source_catalog = getattr(contracts, "SOURCE_TYPES", {}) if supports_filters else {}
 
     with st.sidebar:
         st.subheader("Pfarvis Assistant")
@@ -93,28 +93,20 @@ def main(
                 args=(index,),
             )
 
-        if source_catalog:
-            st.divider()
-            st.subheader("Search in")
-        st.session_state["source_types"] = [
-            kind
-            for kind, metadata in source_catalog.items()
-            if st.checkbox(metadata["label"], value=True, key=f"search-in-{kind}")
-        ]
-
     if render_notes is not None:
         render_notes()
 
-    source_types = st.session_state["source_types"]
     st.title("Pfarvis Assistant", anchor=False)
-    st.caption(f"◉  {status}")
+    st.caption(status)
     if render_reminders is not None:
         render_reminders()
+    chat = st.container()
+    welcome = chat.empty()
     if active_index is None:
-        st.subheader("What can I help you explore?", anchor=False)
+        welcome.subheader("What can I help you explore?", anchor=False)
     else:
         for message in conversations[active_index].messages:
-            with st.chat_message(message.role):
+            with chat.chat_message(message.role):
                 if message.role == "user":
                     st.text(message.text)
                 else:
@@ -123,42 +115,27 @@ def main(
                         st.caption("No supporting notes found.")
                     for number, source in enumerate(message.sources, start=1):
                         with st.expander(f"[{number}] {source.title}"):
-                            if source_catalog:
-                                kind = contracts.source_type_for(source.location or source.title)
-                                if kind:
-                                    st.caption(source_catalog[kind]["label"])
                             if source.location:
                                 st.caption(source.location)
                             if source.excerpt:
                                 st.text(source.excerpt)
 
-    message_column, voice_column = st.columns([5, 1], vertical_alignment="center")
-    with message_column:
-        prompt = st.chat_input("Message Pfarvis Assistant")
-        if source_catalog and not source_types:
-            st.caption("No types selected. Searching all sources.")
-        elif len(source_types) < len(source_catalog):
-            st.caption(f"Searching {len(source_types)} of {len(source_catalog)} sources")
-    with voice_column:
-        if st.button(
-            "Voice",
-            key="voice-input",
-            icon=":material/mic:",
-            help="Voice input is planned for a later release.",
-        ):
-            st.toast("Voice input is coming in a later release.")
+    prompt = st.chat_input("Message Pfarvis Assistant")
 
     if prompt and prompt.strip():
+        welcome.empty()
         message = Message(role="user", text=prompt.strip())
         history = () if active_index is None else conversations[active_index].messages
         messages = (*history, message)
-        if source_types and len(source_types) < len(source_catalog):
-            reply = service.reply(messages, source_types=source_types)
-        else:
-            reply = service.reply(messages)
+        with chat.chat_message("user"):
+            st.text(message.text)
+        with chat.chat_message("assistant"):
+            try:
+                with st.spinner("Thinking…", show_time=True):
+                    reply = service.reply(messages)
+            except Exception:
+                log.exception("Could not complete the chat request")
+                st.error("Something went wrong. Please try sending your message again.")
+                return
         add_messages(message, Message("assistant", reply.text, reply.sources, reply.grounded))
         st.rerun()
-
-
-if __name__ == "__main__":
-    main(MockChatService())
