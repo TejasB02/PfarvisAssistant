@@ -1,0 +1,164 @@
+.stApp {
+    --chat-background: #101522;
+    --chat-surface: #192234;
+    --chat-border: #374762;
+    --chat-text: #f0f4fa;
+    --chat-muted: #bcc9dc;
+    --chat-accent: #70d9d0;
+    --chat-control-hover: #24324a;
+    background: var(--chat-background);
+    color: var(--chat-text);
+    color-scheme: dark;
+}
+
+.stApp [data-testid="stHeader"],
+.stApp [data-testid="stBottomBlockContainer"] {
+    background: var(--chat-background);
+}
+
+.stApp [data-testid="stHeader"] button,
+.stApp [data-testid="stSidebar"] button {
+    color: var(--chat-text);
+}
+
+.stApp [data-testid="stSidebar"],
+.stApp [data-testid="stChatMessage"],
+.stApp [data-testid="stExpander"] details,
+.stApp [data-testid="stChatInput"] [data-baseweb="textarea"] {
+    background: var(--chat-surface);
+    color: var(--chat-text);
+    border-color: var(--chat-border);
+}
+
+.stApp :is(h1, h2, h3, p, label, summary, pre, textarea) {
+    color: var(--chat-text);
+}
+
+.stApp [data-testid="stCaptionContainer"],
+.stApp [data-testid="stCaptionContainer"] p,
+.stApp textarea::placeholder {
+    color: var(--chat-muted);
+}
+
+.stApp [data-testid="stChatMessage"] [data-testid="stText"] > div {
+    color: var(--chat-text);
+}
+
+.stApp [data-testid="stExpander"] details > summary {
+    background-color: var(--chat-surface);
+    color: var(--chat-text);
+}
+
+.stApp [data-testid="stExpander"] details > summary:is(:hover, :focus-visible) {
+    background-color: var(--chat-control-hover);
+}
+
+.stApp [data-testid="stSidebar"] hr {
+    border-color: var(--chat-border);
+}
+
+.stApp [data-testid="stChatInput"] textarea,
+.stApp [data-testid="stChatInput"] button {
+    background: transparent;
+    color: var(--chat-text);
+}
+
+.stApp .stButton button {
+    background: var(--chat-surface);
+    border-color: var(--chat-border);
+    color: var(--chat-text);
+}
+
+.stApp .stButton button:hover,
+.stApp .stButton button:focus-visible {
+    border-color: var(--chat-accent);
+}
+
+.stApp .stButton button[data-testid="stBaseButton-primary"] {
+    background: var(--chat-accent);
+    border-color: var(--chat-accent);
+}
+
+.stApp .stButton button[data-testid="stBaseButton-primary"] p {
+    color: #101522;
+}
+
+.stApp [data-testid="stMainBlockContainer"] {
+    max-width: 54rem;
+    padding-top: 3.5rem;
+}
+
+.stApp [data-testid="stSidebar"] .stButton button {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
+}
+
+.stApp [class*="st-key-delete-chat-"] .stButton button,
+.stApp .st-key-voice-input .stButton button {
+    min-width: 2.5rem;
+    justify-content: center;
+    padding-inline: 0.5rem;
+}
+
+.stApp [class*="st-key-delete-chat-"] button p,
+.stApp .st-key-voice-input button p {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+.stApp [data-testid="stChatMessage"] {
+    border: 1px solid var(--chat-border);
+    border-radius: 0.85rem;
+}
+
+.stApp [data-testid="stChatInput"] > div {
+    background: var(--chat-surface) !important;
+    border: 1px solid var(--chat-border) !important;
+    box-shadow: none !important;
+    overflow: hidden;
+}
+
+.stApp [data-testid="stChatInput"] > div:focus-within {
+    border-color: var(--chat-accent) !important;
+}
+
+.stApp [data-testid="stChatInput"] :is(
+    [data-baseweb="textarea"], [data-baseweb="base-input"], textarea
+) {
+    background: transparent !important;
+    color: var(--chat-text) !important;
+    caret-color: var(--chat-accent);
+}
+
+.stApp button[data-testid="stChatInputSubmitButton"] {
+    color: var(--chat-accent);
+}
+
+.stApp button[data-testid="stChatInputSubmitButton"]:disabled {
+    color: var(--chat-muted);
+}
+
+.stApp :is(.st-key-voice-input, [class*="st-key-delete-chat-"]) button {
+    min-width: 2.5rem;
+    justify-content: center;
+    padding-inline: 0.5rem;
+    background: var(--chat-surface) !important;
+    border-color: var(--chat-border) !important;
+    color: var(--chat-accent) !important;
+}
+
+.stApp :is(.st-key-voice-input, [class*="st-key-delete-chat-"])
+    button:is(:hover, :focus-visible) {
+    background: var(--chat-control-hover) !important;
+    border-color: var(--chat-accent) !important;
+}
+
+.stApp :is(.st-key-voice-input, [class*="st-key-delete-chat-"])
+    button [data-testid="stIconMaterial"] {
+    color: inherit !important;
+}

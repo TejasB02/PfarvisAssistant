@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -111,7 +112,7 @@ def render_sources(sources: list[str]) -> None:
 # --- Reminders -----------------------------------------------------------------
 
 @st.fragment(run_every=REMINDER_POLL_SECONDS)
-def reminder_panel() -> None:
+def reminder_panel(on_add: Callable[[dict], None] | None = None) -> None:
     """Poll the notifier queue, toast new reminders, show cards with "Add to chat".
 
     Runs as a fragment so only this block reruns every few seconds.
@@ -127,7 +128,11 @@ def reminder_panel() -> None:
             st.caption(reminder["filename"])
             add_col, dismiss_col = st.columns(2)
             if add_col.button("Add to chat", key=f"rem_add_{reminder['note_id']}"):
-                inject_reminder(reminder)
+                if on_add is None:
+                    inject_reminder(reminder)
+                else:
+                    on_add(reminder)
+                    _drop_reminder(reminder["note_id"])
                 st.rerun()  # full rerun so the chat shows the new message
             if dismiss_col.button("Dismiss", key=f"rem_dismiss_{reminder['note_id']}"):
                 _drop_reminder(reminder["note_id"])
