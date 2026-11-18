@@ -5,8 +5,7 @@
 # Hands off: the model's reply text (str) back to engine.py / pipeline.py;
 #            is_available() is also read by Person 4's UI for a status line.
 # Engine   : ollama.Client(host=config.OLLAMA_HOST), which is 127.0.0.1 only,
-#            model config.OLLAMA_MODEL.
-# STATUS   : STUB - no Ollama call; returns a mock reply.
+#            model config.OLLAMA_MODEL. No other host is ever contacted.
 # =============================================================================
 """Thin wrapper around the local Ollama server."""
 
@@ -14,31 +13,48 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
+from typing import Any, Iterable, Optional
 
 import config
-from contracts import FALLBACK_MESSAGE
 
 log = logging.getLogger(__name__)
 
+AVAILABILITY_TIMEOUT_SECONDS = 2
+AVAILABILITY_CACHE_SECONDS = 30.0
+_THINK_RE = re.compile(r"<think>.*?</think>", flags=re.DOTALL | re.IGNORECASE)
 
-def _client():
-    """Create the Ollama client bound to the local host (import inside)."""
-    import ollama  # heavy import kept inside the function
+_availability: Optional[tuple[float, bool]] = None  # (checked_at monotonic, result)
+_availability_lock = threading.Lock()
 
-    return ollama.Client(host=config.OLLAMA_HOST, timeout=config.LLM_TIMEOUT_SECONDS)
+
+def _client(timeout: float | None = None):
+    """Ollama client bound to the local host. Heavy import kept inside."""
+    import ollama
+
+    return ollama.Client(
+        host=config.OLLAMA_HOST,
+        timeout=config.OLLAMA_TIMEOUT_SECONDS if timeout is None else timeout,
+    )
 
 
 def is_available() -> bool:
     """Return True if the local Ollama server answers and the model is pulled.
 
-    Output: bool. Must never raise and must return quickly (short timeout),
-    because the UI calls it on every rerun.
+    Output: bool. Never raises. Uses a separate client with a 2 s timeout, and
+    caches the result (True or False) for 30 s because the Streamlit sidebar
+    calls this on every rerun.
     Edge cases: server down, model not pulled, ollama package missing -> False.
     """
-    # TODO(person 3): real check, e.g.
-    #   try: models = _client().list(); return any(config.OLLAMA_MODEL in m.model ...)
-    #   except Exception: return False
-    return True  # mock: pretend the local model is up
+    global _availability
+    with _availability_lock:
+        now = time.monotonic()
+        if _availability and now - _availability[0] < AVAILABILITY_CACHE_SECONDS:
+            return _availability[1]
+        result = _check_available()
+        _availability = (now, result)
+        return result
 
 
 def chat(messages: list[dict[str, str]], temperature: float = 0.0) -> str:
@@ -46,24 +62,68 @@ def chat(messages: list[dict[str, str]], temperature: float = 0.0) -> str:
 
     Inputs:
         messages: [{"role": "system"|"user"|"assistant", "content": str}, ...]
-        temperature: 0.0 by default for repeatable, grounded answers.
+        temperature: 0.0 by default; a fixed seed (42) keeps replies repeatable.
     Output:
-        The assistant reply, stripped.
+        The assistant reply, stripped (any <think>...</think> block removed).
     Edge cases:
-        - Server down / timeout -> raise; engine.py catches and returns the
-          fallback answer.
+        - Server down / timeout / model missing -> raises; engine.py turns that
+          into the fallback answer and pipeline.rewrite_query into "no rewrite".
         - Empty reply -> "".
     """
-    # TODO(person 3): real call:
-    #   resp = _client().chat(model=config.OLLAMA_MODEL, messages=messages,
-    #                         options={"temperature": temperature})
-    #   return resp["message"]["content"].strip()
-    # Mock: cite the first SOURCE header from the CONTEXT block (see engine.py).
-    last = messages[-1]["content"] if messages else ""
-    match = re.search(r"^SOURCE \[([^\]\n]+)\]", last, flags=re.MULTILINE)
-    if not match:
-        return FALLBACK_MESSAGE
-    return (
-        "(mock reply - the local LLM is not wired up yet) "
-        f"The most relevant note is [{match.group(1)}]."
+    response = _client().chat(
+        model=config.OLLAMA_MODEL,
+        messages=messages,
+        options={"temperature": temperature, "seed": 42},
     )
+    message = _field(response, "message")
+    content = _field(message, "content") or ""
+    return _THINK_RE.sub("", content).strip()
+
+
+# --- helpers --------------------------------------------------------------------
+
+def _check_available() -> bool:
+    try:
+        response = _client(timeout=AVAILABILITY_TIMEOUT_SECONDS).list()
+        names = list(_model_names(_field(response, "models") or []))
+    except Exception as exc:  # noqa: BLE001 - any failure means "not available"
+        log.info("Local LLM not available at %s: %s", config.OLLAMA_HOST, exc)
+        return False
+    if any(_same_model(config.OLLAMA_MODEL, name) for name in names):
+        return True
+    log.info("Model %r is not pulled. Pulled models: %s", config.OLLAMA_MODEL, names)
+    return False
+
+
+def _model_names(models: Iterable[Any]) -> Iterable[str]:
+    """Names from list() entries: objects with .model, or dicts with "name"/"model"."""
+    for entry in models:
+        name = getattr(entry, "model", None)
+        if not name and isinstance(entry, dict):
+            name = entry.get("name") or entry.get("model")
+        if name:
+            yield str(name)
+
+
+def _same_model(wanted: str, pulled: str) -> bool:
+    """"llama3" matches "llama3:latest"; an explicit tag must match exactly."""
+    wanted, pulled = wanted.strip().lower(), pulled.strip().lower()
+    if ":" in wanted:
+        return wanted == pulled
+    return pulled.split(":", 1)[0] == wanted
+
+
+def _field(obj: Any, name: str) -> Any:
+    """Read ``name`` from a pydantic-style response object or a plain dict."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _reset_availability_cache() -> None:
+    """Forget the cached is_available() result (for tests)."""
+    global _availability
+    with _availability_lock:
+        _availability = None

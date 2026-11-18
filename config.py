@@ -59,7 +59,8 @@ EMBED_MODEL_PATH: str = str(PROJECT_ROOT / "models" / "all-MiniLM-L6-v2")
 # Fixed to the loopback interface on purpose; deliberately NOT read from env.
 OLLAMA_HOST: str = "http://127.0.0.1:11434"
 OLLAMA_MODEL: str = os.environ.get("OLLAMA_MODEL", "llama3")
-LLM_TIMEOUT_SECONDS: int = _env_int("LLM_TIMEOUT_SECONDS", 120)
+# The first call loads the model into memory and can be slow.
+OLLAMA_TIMEOUT_SECONDS: int = _env_int("OLLAMA_TIMEOUT_SECONDS", 120)
 
 # --- Ingestion ---------------------------------------------------------------
 SUPPORTED_EXTENSIONS: tuple[str, ...] = (".txt", ".md", ".pdf", ".docx", ".png", ".jpg", ".jpeg")
@@ -68,6 +69,9 @@ TESSERACT_CMD: str | None = os.environ.get("TESSERACT_CMD") or None
 
 # --- Retrieval & guardrails ---------------------------------------------------
 RETRIEVAL_TOP_K: int = _env_int("RETRIEVAL_TOP_K", 5)
+# TODO: Tune once Person 2's real embeddings land: set between the best score for
+# in-notes questions and for the parking question. (pipeline.ask logs the best
+# semantic score of every query at INFO.)
 MIN_SIMILARITY: float = _env_float("MIN_SIMILARITY", 0.35)  # cosine similarity, 0..1
 GRAPH_HOPS: int = _env_int("GRAPH_HOPS", 1)
 

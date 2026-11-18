@@ -5,7 +5,7 @@
 # Hands off: AnswerDict -> pipeline.ask -> Person 4 (UI).
 # Rules    : no context -> fallback WITHOUT calling the LLM; bad or missing
 #            citations -> fallback. Fallback = contracts.fallback_answer().
-# STATUS   : guard flow is REAL; the LLM behind llm_client.chat is a mock.
+# STATUS   : real; calls the local model through llm_client.chat.
 # =============================================================================
 """Grounded answering: prompt -> local LLM -> citation check."""
 
@@ -93,6 +93,7 @@ def answer_user_query(
         return fallback_answer()
 
     answer = (raw or "").strip()
+    log.debug("Raw LLM reply (before validation): %r", answer)
     if not answer or FALLBACK_MESSAGE.lower() in answer.replace("’", "'").lower():
         return fallback_answer()
     if not guardrails.validate_citations(answer, retrieved_context):
