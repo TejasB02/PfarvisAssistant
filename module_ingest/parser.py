@@ -4,21 +4,86 @@
 # Hands off: list[dict], one per file, each exactly asdict(contracts.NoteItem)
 #            -> Person 2 (NotesStore.add) and Person 4 (sidebar + reminders).
 # Uses     : ocr.image_to_text for images, extract.* for client/tags/event_time.
-# STATUS   : STUB - returns hardcoded mock notes that mirror sample_notes/.
 # =============================================================================
 """Recursive scan of a notes folder and per-file parsing."""
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import config
 from contracts import NoteItem, make_note_id, note_to_dict
+from module_ingest import extract, ocr
 
 log = logging.getLogger(__name__)
+
+
+def _is_hidden(path: Path, root: Optional[Path] = None) -> bool:
+    """Return True if any path component (relative to root, or filename) starts with '.'."""
+    target = path.relative_to(root) if root and path.is_relative_to(root) else Path(path.name)
+    return any(part.startswith(".") for part in target.parts)
+
+
+def _extract_title(content: str, fallback_stem: str) -> str:
+    """Derive title from the first Markdown heading, first non-empty line, or file stem."""
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if heading:
+                return heading
+        return stripped[:120]
+    return fallback_stem
+
+
+def _client_from_path(path: Path) -> Optional[str]:
+    """Return <Name> if ``path`` lives under a ``.../Clients/<Name>/...`` directory."""
+    parts = path.parts
+    for idx, part in enumerate(parts[:-1]):
+        if part.lower() == "clients" and idx + 1 < len(parts) - 1:
+            folder_name = parts[idx + 1]
+            if folder_name and not folder_name.startswith("."):
+                return folder_name
+    return None
+
+
+def _read_text_by_extension(path: Path) -> str:
+    """Read raw text from ``path`` according to its lowercase suffix."""
+    suffix = path.suffix.lower()
+
+    if suffix in {".txt", ".md"}:
+        raw = path.read_bytes()
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return raw.decode("utf-8", errors="replace")
+
+    if suffix == ".pdf":
+        from pypdf import PdfReader
+
+        reader = PdfReader(str(path))
+        if reader.is_encrypted:
+            log.warning("Skipping encrypted PDF: %s", path)
+            return ""
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages).strip()
+
+    if suffix == ".docx":
+        import docx
+
+        document = docx.Document(str(path))
+        paragraphs = [p.text for p in document.paragraphs if p.text]
+        return "\n".join(paragraphs).strip()
+
+    if suffix in {".png", ".jpg", ".jpeg"}:
+        return ocr.image_to_text(path)
+
+    return ""
 
 
 def scan_and_parse(dir_path: str | Path) -> list[dict]:
@@ -38,17 +103,29 @@ def scan_and_parse(dir_path: str | Path) -> list[dict]:
           ``parse_file`` returns None for are skipped, never crash the scan.
         - Duplicate content in two files is kept (two different notes).
     """
-    # TODO(person 1): replace the mock with the real scan:
-    #   root = Path(dir_path).expanduser().resolve()
-    #   for path in sorted(root.rglob("*")):
-    #       if path.is_file() and path.suffix.lower() in config.SUPPORTED_EXTENSIONS:
-    #           note = parse_file(path)   # wrap in try/except, log and continue
-    #           if note: notes.append(note)
     root = Path(dir_path).expanduser().resolve()
-    if not root.exists():
+    if not root.exists() or not root.is_dir():
         log.warning("Notes folder not found: %s", root)
         return []
-    return _mock_notes(root)
+
+    extract.register_known_clients(root)
+
+    notes: list[dict] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if _is_hidden(path, root):
+            continue
+        if path.suffix.lower() not in config.SUPPORTED_EXTENSIONS:
+            continue
+        try:
+            note = parse_file(path)
+            if note is not None:
+                notes.append(note)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to parse %s: %s", path, exc)
+
+    return sorted(notes, key=lambda n: n["filepath"])
 
 
 def parse_file(path: Path) -> Optional[dict]:
@@ -72,102 +149,40 @@ def parse_file(path: Path) -> Optional[dict]:
         - .pdf via pypdf, .docx via python-docx, images via ocr.image_to_text.
           Import those libraries INSIDE the branch that needs them.
     """
-    # TODO(person 1): implement the real dispatch described above.
     path = Path(path)
+    if path.name.startswith("."):
+        log.info("Skipping hidden file: %s", path)
+        return None
     if not path.is_file() or path.suffix.lower() not in config.SUPPORTED_EXTENSIONS:
         log.info("Skipping unsupported or missing file: %s", path)
         return None
-    resolved = path.resolve()
+
+    try:
+        resolved = path.resolve()
+        mtime = datetime.fromtimestamp(resolved.stat().st_mtime)
+        raw_content = _read_text_by_extension(resolved)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not read file %s: %s", path, exc)
+        return None
+
+    content = raw_content.strip()
+    if not content:
+        log.info("Skipping empty or unreadable file: %s", resolved)
+        return None
+
+    title = _extract_title(content, resolved.stem)
+    client = extract.guess_client(content) or _client_from_path(resolved)
+    tags = extract.extract_tags(content)
+    event_time = extract.extract_event_time(content, reference=mtime)
+
     note = NoteItem(
         id=make_note_id(resolved),
-        title=path.stem,
-        content=f"(mock) Parsed content of {path.name} would appear here.",
+        title=title,
+        content=content,
         filepath=str(resolved),
-        timestamp=datetime.fromtimestamp(path.stat().st_mtime),
+        timestamp=mtime,
+        client=client,
+        tags=tags,
+        event_time=event_time,
     )
     return note_to_dict(note)
-
-
-# --- Mock data (delete once the real scan works) -------------------------------
-
-def _mock_notes(root: Path) -> list[dict]:
-    """Hardcoded notes shaped like the real sample_notes/ files.
-
-    The first note's event_time is 5 minutes from now so the reminder flow
-    (notifier -> toast -> "Add to chat") can be demoed immediately.
-    """
-    now = datetime.now().replace(second=0, microsecond=0)
-    specs = [
-        dict(
-            rel="meetings/2026-11/call_prep.txt",
-            title="Call prep - 4pm client call",
-            content=(
-                "Call with the clients at 4pm today - rollout check-in.\n"
-                "Agenda: wave 2 timeline, support hours over the holidays, pricing tier.\n"
-                "#q3-rollout #client-call"
-            ),
-            client=None,
-            tags=["q3-rollout", "client-call"],
-            event_time=now + timedelta(minutes=5),  # mock: fires a reminder right away
-        ),
-        dict(
-            rel="Work/Clients/Quillmont/account_overview.md",
-            title="Quillmont Systems - account overview",
-            content=(
-                "Client: Quillmont Systems. Main contacts: Dana Okafor (ops lead) and "
-                "Lukas Brandt (procurement). We run the rollout check-in calls with "
-                "Quillmont's ops team. #quillmont #q3-rollout"
-            ),
-            client="Quillmont Systems",
-            tags=["quillmont", "q3-rollout"],
-            event_time=None,
-        ),
-        dict(
-            rel="Desktop dump/untitled 3.txt",
-            title="untitled 3",
-            content=(
-                "re the 4pm rollout check-in: Dana confirmed it's virtual, not in person "
-                "this time. Video link is in the calendar invite. #q3-rollout"
-            ),
-            client=None,
-            tags=["q3-rollout"],
-            event_time=None,
-        ),
-        dict(
-            rel="old_notes/2026/q2_review.md",
-            title="Q2 review - Quillmont",
-            content=(
-                "Quillmont Systems Q2 review: on budget, two late deliveries, "
-                "they want weekly status emails. #quillmont #budget"
-            ),
-            client="Quillmont Systems",
-            tags=["quillmont", "budget"],
-            event_time=None,
-        ),
-        dict(
-            rel="Work/Clients/Norrbridge/kickoff.md",
-            title="Norrbridge Foods - pilot kickoff",
-            content=(
-                "Client: Norrbridge Foods. Pilot kickoff is in person at their Easton "
-                "office on Friday at 10am. Contact: Ines Valdier. #norrbridge #pilot"
-            ),
-            client="Norrbridge Foods",
-            tags=["norrbridge", "pilot"],
-            event_time=(now + timedelta(days=2)).replace(hour=10, minute=0),
-        ),
-    ]
-    notes: list[dict] = []
-    for spec in specs:
-        filepath = str((root / spec["rel"]).resolve())
-        note = NoteItem(
-            id=make_note_id(filepath),
-            title=spec["title"],
-            content=spec["content"],
-            filepath=filepath,
-            timestamp=now,
-            client=spec["client"],
-            tags=list(spec["tags"]),
-            event_time=spec["event_time"],
-        )
-        notes.append(note_to_dict(note))
-    return sorted(notes, key=lambda n: n["filepath"])
