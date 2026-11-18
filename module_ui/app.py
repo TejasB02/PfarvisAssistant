@@ -7,7 +7,7 @@ from pathlib import Path
 import streamlit as st
 
 import contracts
-from frontend.chat_service import ChatService, Message, MockChatService
+from module_ui.chat_service import ChatService, Message, MockChatService
 
 
 @dataclass

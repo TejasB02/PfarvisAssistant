@@ -4,7 +4,7 @@ import config  # noqa: F401 - configure offline mode before importing the app
 
 import logging
 
-from frontend.rag_app import run
+from module_ui.rag_app import run
 
 if __name__ == "__main__":
     logging.basicConfig(

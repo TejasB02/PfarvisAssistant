@@ -8,8 +8,8 @@ from typing import Optional, Sequence
 import streamlit as st
 
 from contracts import fallback_answer
-from frontend.app import add_messages, main
-from frontend.chat_service import ChatReply, Message, SourceReference
+from module_ui.app import add_messages, main
+from module_ui.chat_service import ChatReply, Message, SourceReference
 from module_ingest.parser import scan_and_parse
 from module_rag import llm_client, pipeline
 from module_storage.store import NotesStore

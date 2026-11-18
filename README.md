@@ -279,7 +279,7 @@ streamlit run app.py      # from the project root
 
 Open **http://localhost:8501** (or http://127.0.0.1:8501) to use the Pfarvis Assistant interface with your local notes. Streamlit listens on 127.0.0.1 only.
 
-To preview the same interface with mock chat, run `python -m streamlit run frontend/app.py`.
+To preview the same interface with mock chat, run `python -m streamlit run module_ui/app.py`.
 
 To use your own notes, set `NOTE_DIR`, for example `set NOTE_DIR=C:\Users\me\Documents\notes` on Windows or `export NOTE_DIR=~/notes` on macOS/Linux.
 
