@@ -3,87 +3,143 @@
 # Receives : list[dict] note dicts from Person 1 (parser.scan_and_parse) via app.py.
 # Hands off: NotesStore -> Person 3 (pipeline.ask calls hybrid_search/get_note)
 #            and Person 4 (scheduler reads all_notes()).
-# Wiring   : vector_db.VectorDB (semantic) + knowledge_graph.KnowledgeGraph (links).
-# STATUS   : STUB - in-memory notes; mock vector scores; graph returns nothing.
+# Wiring   : vector_db.VectorDBStore (Chroma + local embeddings, semantic) +
+#            knowledge_graph.KnowledgeGraph (shared client / tag links).
+# Contract : the README's NotesStore API: add(notes), query(text, k),
+#            hybrid_search(query, k, hops) -> list[ContextItem], get_note,
+#            all_notes, remove. Don't change these signatures.
 # =============================================================================
 """NotesStore: the single public storage API used by the rest of the app."""
 
-from typing import List, Dict, Any, Optional
-from .vector_db import VectorDBStore
+from __future__ import annotations
+
+import logging
+import threading
+from typing import Any, Dict, List, Optional
+
+import config as default_config
+from contracts import ContextItem
+
 from .knowledge_graph import KnowledgeGraph
+from .vector_db import VectorDBStore
+
+log = logging.getLogger(__name__)
+
+# Graph neighbours inherit their parent's score times this factor, so they rank
+# below the semantic hit that led to them.
+GRAPH_SCORE_DECAY = 0.7
+
 
 class NotesStore:
-    def __init__(self, config, custom_embedder=None):
-        self.config = config
-        self.vector_store = VectorDBStore(config, custom_model=custom_embedder)
+    def __init__(self, config=None, custom_embedder=None):
+        """Open the local Chroma collection and an empty graph.
+
+        config: the config module (defaults to the project's config.py).
+        custom_embedder: object with .encode(texts, normalize_embeddings=True),
+            used by tests instead of the real sentence-transformers model.
+        """
+        self.config = config or default_config
+        self.vector_store = VectorDBStore(self.config, custom_model=custom_embedder)
         self.graph = KnowledgeGraph()
         self._notes_cache: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()  # the watcher thread may add/remove while the UI searches
 
-    def add(self, note_id: str, content: str, metadata: Dict[str, Any]):
-        """Adds or updates a note across vector DB, graph, and local cache."""
-        full_record = {"id": note_id, "content": content, **metadata}
-        self._notes_cache[note_id] = full_record
-        
-        # Upsert into vector database
-        self.vector_store.upsert(note_id, content, metadata)
-        
-        # Update knowledge graph relationships
-        self.graph.add_note(note_id, metadata, self._notes_cache)
+    def add(self, notes: list[dict]) -> None:
+        """Add or update note dicts (NoteItem shape) in the vector DB, graph and cache.
 
-    def remove(self, note_id: str):
-        """Removes a note from the store components."""
-        if note_id in self._notes_cache:
-            del self._notes_cache[note_id]
-        self.vector_store.delete(note_id)
-        self.graph.remove_node(note_id)
+        Notes without an id or with empty content are skipped. After a batch,
+        Chroma rows for notes this store does not know (deleted files from an
+        earlier run) are removed, so they can't come back as search hits.
+        """
+        with self._lock:
+            for note in notes or []:
+                note_id = (note or {}).get("id")
+                content = (note or {}).get("content") or ""
+                if not note_id or not content.strip():
+                    continue
+                if note_id in self._notes_cache:
+                    self.graph.remove_note(note_id)  # rebuild its edges from the new version
+                self._notes_cache[note_id] = dict(note)
+                metadata = {k: v for k, v in note.items() if k not in ("id", "content")}
+                self.vector_store.upsert(note_id, content, metadata)
+                self.graph.add_note(note_id, metadata, self._notes_cache)
+            self._prune_stale_vectors()
+
+    def remove(self, note_id: str) -> None:
+        """Remove a note from the cache, the vector DB and the graph (no-op if unknown)."""
+        with self._lock:
+            self._notes_cache.pop(note_id, None)
+            self.vector_store.delete(note_id)
+            self.graph.remove_note(note_id)
 
     def get_note(self, note_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieves a single note record by ID."""
-        return self._notes_cache.get(note_id)
+        """Return a copy of one note dict, or None."""
+        with self._lock:
+            note = self._notes_cache.get(note_id)
+            return dict(note) if note is not None else None
 
     def all_notes(self) -> List[Dict[str, Any]]:
-        """Returns all stored notes."""
-        return list(self._notes_cache.values())
+        """Return a snapshot list of every stored note dict (any order)."""
+        with self._lock:
+            return [dict(n) for n in self._notes_cache.values()]
 
-    def query(self, query_text: str, k: int = 5) -> List[Dict[str, Any]]:
-        """Performs pure semantic vector search."""
-        return self.vector_store.query(query_text, k=k)
+    def query(self, text: str, k: int = 5) -> list[ContextItem]:
+        """Thin alias of hybrid_search with the configured graph hops."""
+        return self.hybrid_search(text, k=k, hops=self.config.GRAPH_HOPS)
 
-    def hybrid_search(self, query: str, k: int = 5, hops: int = 1) -> List[Dict[str, Any]]:
+    def hybrid_search(self, query: str, k: int = 5, hops: int = 1) -> list[ContextItem]:
+        """Semantic hits first, then graph neighbours of those hits within ``hops``.
+
+        Output: list[ContextItem]. Semantic hits have via="semantic" and their
+        cosine similarity (0..1); graph neighbours have via="graph" and their
+        parent's score times GRAPH_SCORE_DECAY. De-duplicated by note id.
+        Blank query or empty store -> [].
         """
-        Combines vector similarity and graph traversal:
-        Returns semantic hits first, followed by graph neighbors within hops,
-        scored by parent score times GRAPH_SCORE_DECAY.
-        """
-        # 1. Get initial semantic hits
-        semantic_hits = self.vector_store.query(query, k=k)
-        
-        results = list(semantic_hits)
-        seen_ids = {hit["id"] for hit in semantic_hits}
-        seed_ids = list(seen_ids)
+        if not query or not query.strip():
+            return []
+        with self._lock:
+            if not self._notes_cache:
+                return []
+            try:
+                hits = self.vector_store.query(query, k=k)
+            except Exception:  # noqa: BLE001 - a broken index must not crash the chat
+                log.exception("Vector search failed")
+                return []
 
-        # 2. Get graph neighbors within hops
-        graph_neighbors = self.graph.get_neighbors(seed_ids, hops=hops)
-        
-        decay = getattr(self.config, "GRAPH_SCORE_DECAY", 0.7)
-        score_map = {hit["id"]: hit["score"] for hit in semantic_hits}
+            results: list[ContextItem] = []
+            scores: Dict[str, float] = {}
+            for hit in hits:
+                note = self._notes_cache.get(hit["id"])
+                if note is None or hit["id"] in scores:
+                    continue
+                scores[hit["id"]] = hit["score"]
+                results.append(_to_context(note, hit["score"], "semantic"))
 
-        for neighbor in graph_neighbors:
-            n_id = neighbor["id"]
-            if n_id not in seen_ids and n_id in self._notes_cache:
-                seen_ids.add(n_id)
-                parent_id = neighbor["parent_id"]
-                parent_score = score_map.get(parent_id, 0.5)
-                decayed_score = parent_score * decay
+            if hops > 0 and scores:
+                for neighbour in self.graph.get_neighbors(list(scores), hops=hops):
+                    note = self._notes_cache.get(neighbour["id"])
+                    if note is None or neighbour["id"] in scores:
+                        continue
+                    score = scores.get(neighbour["parent_id"], 0.0) * GRAPH_SCORE_DECAY
+                    scores[neighbour["id"]] = score
+                    results.append(_to_context(note, score, "graph"))
+            return results
 
-                note_record = self._notes_cache[n_id]
-                results.append({
-                    "id": n_id,
-                    "content": note_record.get("content", ""),
-                    "metadata": {k: v for k, v in note_record.items() if k != "content"},
-                    "score": decayed_score,
-                    "via": "graph",
-                    "reason": neighbor["reason"]
-                })
+    def _prune_stale_vectors(self) -> None:
+        try:
+            stored = self.vector_store.collection.get(include=[])["ids"]
+        except Exception:  # noqa: BLE001
+            return
+        for note_id in stored:
+            if note_id not in self._notes_cache:
+                self.vector_store.delete(note_id)
 
-        return results
+
+def _to_context(note: dict, score: float, via: str) -> ContextItem:
+    return ContextItem(
+        filepath=note["filepath"],
+        title=note.get("title") or "",
+        content=note.get("content") or "",
+        score=max(0.0, min(1.0, float(score))),
+        via=via,
+    )
