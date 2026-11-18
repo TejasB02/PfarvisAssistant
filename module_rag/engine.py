@@ -76,7 +76,7 @@ def answer_user_query(
         validate_citations; ``sources`` are the cited context filepaths.
     Edge cases (all return contracts.fallback_answer()):
         - has_enough_context False -> fallback, LLM is NOT called.
-        - LLM raises (server down, timeout) -> logged, fallback.
+        - LLM raises (server down, timeout) -> a model error message.
         - LLM replies with FALLBACK_MESSAGE -> fallback.
         - validate_citations False (no citation, or a file not in context) -> fallback.
     """
@@ -88,9 +88,8 @@ def answer_user_query(
     messages = build_messages(query, retrieved_context, chat_history)
     try:
         raw = llm_client.chat(messages, temperature=0.0)
-    except Exception:  # noqa: BLE001 - any LLM failure must degrade safely
-        log.exception("Local LLM call failed")
-        return fallback_answer()
+    except Exception as exc:
+        return llm_client.failure_answer(exc)
 
     answer = (raw or "").strip()
     log.debug("Raw LLM reply (before validation): %r", answer)

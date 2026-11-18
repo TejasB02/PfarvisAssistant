@@ -41,6 +41,8 @@ def event_filter(query: str, now: Optional[datetime] = None) -> Optional[EventFi
     def between(start: datetime, end: datetime) -> EventFilter:
         return lambda dt: start <= dt < end
 
+    if re.search(r"\bnext 90 days\b", text):
+        return between(now, now + timedelta(days=90))
     if re.search(r"\btoday\b|\btonight\b", text):
         return between(today, today + timedelta(days=1))
     if re.search(r"\btomorrow\b", text):

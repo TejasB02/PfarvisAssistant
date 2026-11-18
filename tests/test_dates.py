@@ -20,6 +20,7 @@ NOW = datetime(2026, 11, 18, 15, 0)  # a Wednesday
     ("next week's calls", datetime(2026, 11, 23, 10), datetime(2026, 11, 22, 10)),
     ("anything this month", datetime(2026, 11, 1, 8), datetime(2026, 12, 1, 8)),
     ("anything next month", datetime(2026, 12, 31, 8), datetime(2026, 11, 30, 8)),
+    ("events in the next 90 days", datetime(2026, 12, 9, 14), datetime(2026, 11, 18, 14)),
     ("what happens in May?", datetime(2027, 5, 3, 9), datetime(2027, 6, 3, 9)),
 ])
 def test_event_filter_spans(question, inside, outside):
@@ -64,6 +65,7 @@ def captured_context(monkeypatch):
         seen.append(retrieved_context)
         return {"answer": "ok", "sources": [], "grounded": False}
 
+    monkeypatch.setattr(pipeline, "_route_query", lambda query, history: ("notes", query))
     monkeypatch.setattr(engine, "answer_user_query", fake_answer)
     return seen
 
