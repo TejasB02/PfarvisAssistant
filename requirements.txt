@@ -1,6 +1,6 @@
 # Local Notes Assistant - all packages run fully offline after a one-time install.
 # streamlit>=1.37 is needed for st.fragment(run_every=...) (verified locally on 1.37.1).
-streamlit>=1.37
+streamlit>=1.50
 chromadb
 sentence-transformers
 ollama
