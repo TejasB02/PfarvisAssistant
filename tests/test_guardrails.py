@@ -1,5 +1,6 @@
 """The assistant must never invent: no context -> no LLM call; bad citations -> fallback."""
 
+import json
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -74,7 +75,9 @@ def test_engine_passes_through_model_fallback(fake_chat):
 
 def test_engine_survives_llm_errors(fake_chat):
     fake_chat.side_effect = ConnectionError("ollama is not running")
-    assert engine.answer_user_query("When?", [_ctx("a.md")], []) == fallback_answer()
+    result = engine.answer_user_query("When?", [_ctx("a.md")], [])
+    assert "Start Ollama" in result["answer"]
+    assert result["sources"] == []
 
 
 def test_system_prompt_states_the_rules():
@@ -197,6 +200,7 @@ def captured_context(monkeypatch):
 
 
 def test_ask_adds_pinned_notes_with_zero_score(captured_context, fake_chat):
+    fake_chat.return_value = json.dumps({"route": "notes", "text": 'Is it virtual?'})
     store = FakeStore([_ctx("call_prep.txt")], {"p1": _note("p1", "untitled 3.txt")})
     pipeline.ask("Is it virtual?", [], store, pinned_note_ids=["p1"])
     context = captured_context[0]
@@ -205,28 +209,57 @@ def test_ask_adds_pinned_notes_with_zero_score(captured_context, fake_chat):
 
 
 def test_ask_ignores_missing_pinned_ids(captured_context, fake_chat):
+    fake_chat.return_value = json.dumps({"route": "notes", "text": 'Is it virtual?'})
     store = FakeStore([_ctx("call_prep.txt")], {})
     pipeline.ask("Is it virtual?", [], store, pinned_note_ids=["gone"])
     assert len(captured_context[0]) == 1
 
 
 def test_ask_does_not_add_a_pinned_note_twice(captured_context, fake_chat):
+    fake_chat.return_value = json.dumps({"route": "notes", "text": 'When?'})
     store = FakeStore([_ctx("call_prep.txt")], {"p1": _note("p1", "call_prep.txt")})
     pipeline.ask("When?", [], store, pinned_note_ids=["p1", "p1"])
     assert [c["filepath"] for c in captured_context[0]] == ["/notes/meetings/call_prep.txt"]
 
 
-def test_ask_with_only_pinned_notes_returns_fallback_without_llm(fake_chat):
+def test_ask_with_only_pinned_notes_returns_fallback_after_routing(fake_chat):
+    fake_chat.return_value = json.dumps({"route": "notes", "text": 'Is it virtual?'})
     store = FakeStore([], {"p1": _note("p1", "untitled 3.txt")})
     assert pipeline.ask("Is it virtual?", [], store, pinned_note_ids=["p1"]) == fallback_answer()
-    fake_chat.assert_not_called()
+    fake_chat.assert_called_once()
 
 
 def test_ask_searches_with_the_rewritten_query(captured_context, fake_chat):
-    fake_chat.return_value = "Which client is the 4pm call today with?"
+    fake_chat.return_value = json.dumps({"route": "notes", "text": "Which client is the 4pm call today with?"})
     store = FakeStore([_ctx("call_prep.txt")], {})
     pipeline.ask("Which client?", HISTORY, store)
     assert store.queries == ["Which client is the 4pm call today with?"]
+
+
+@pytest.mark.parametrize(
+    "route, query, reply",
+    [
+        ("reply", "can u help me", "Of course. What would you like to find?"),
+        ("out_of_scope", "What's the weather today?", "I don't have live weather data."),
+    ],
+)
+def test_ask_returns_model_reply_without_search(fake_chat, route, query, reply):
+    fake_chat.return_value = json.dumps({"route": route, "text": reply})
+    store = FakeStore([], {})
+    assert pipeline.ask(query, [], store) == {
+        "answer": reply, "sources": [], "grounded": False,
+    }
+    assert store.queries == []
+    assert fake_chat.call_args.args[0][-1]["content"] == query
+
+
+@pytest.mark.parametrize("raw", ["", "invalid JSON", "[]", '{"route":"notes","text":""}'])
+def test_ask_handles_invalid_model_routing(fake_chat, raw):
+    fake_chat.return_value = raw
+    store = FakeStore([], {})
+    result = pipeline.ask("Find my notes", [], store)
+    assert "couldn't complete" in result["answer"]
+    assert store.queries == []
 
 
 # --- live check against the real local model (skipped when it is not available) -------

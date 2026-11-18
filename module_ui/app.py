@@ -111,8 +111,6 @@ def main(
                     st.text(message.text)
                 else:
                     st.markdown(message.text)
-                    if message.grounded is False:
-                        st.caption("No supporting notes found.")
                     for number, source in enumerate(message.sources, start=1):
                         with st.expander(f"[{number}] {source.title}"):
                             if source.location:

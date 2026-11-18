@@ -18,6 +18,7 @@ import time
 from typing import Any, Iterable, Optional
 
 import config
+from contracts import AnswerDict
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,12 @@ def is_available() -> bool:
         return result
 
 
-def chat(messages: list[dict[str, str]], temperature: float = 0.0) -> str:
+def chat(
+    messages: list[dict[str, str]],
+    temperature: float = 0.0,
+    *,
+    response_format: dict[str, Any] | None = None,
+) -> str:
     """Send ``messages`` to the local model and return the reply text.
 
     Inputs:
@@ -74,11 +80,24 @@ def chat(messages: list[dict[str, str]], temperature: float = 0.0) -> str:
         model=config.OLLAMA_MODEL,
         messages=messages,
         options={"temperature": temperature, "seed": 42},
+        **({"format": response_format} if response_format is not None else {}),
         **({"think": False} if config.OLLAMA_MODEL.split(":", 1)[0] == "gemma4" else {}),
     )
     message = _field(response, "message")
     content = _field(message, "content") or ""
     return _THINK_RE.sub("", content).strip()
+
+
+def failure_answer(error: Exception) -> AnswerDict:
+    """Report a local model failure separately from a notes search miss."""
+    log.warning("Local model could not respond: %s", error)
+    if isinstance(error, ConnectionError):
+        message = "I couldn't reach the local Ollama server. Start Ollama and try again."
+    elif getattr(error, "status_code", None) == 404:
+        message = f"The local model {config.OLLAMA_MODEL} is missing. Pull it in Ollama and try again."
+    else:
+        message = "The local model couldn't complete this request. Please try again."
+    return {"answer": message, "sources": [], "grounded": False}
 
 
 # --- helpers --------------------------------------------------------------------

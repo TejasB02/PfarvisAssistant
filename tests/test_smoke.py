@@ -4,6 +4,7 @@ nothing points off the machine, and the Streamlit app runs end to end."""
 import ast
 import importlib
 import inspect
+import json
 import os
 import re
 import subprocess
@@ -44,7 +45,7 @@ SIGNATURES = {
     ("module_storage.store", "NotesStore.all_notes"): ["self"],
     ("module_storage.store", "NotesStore.remove"): ["self", "note_id"],
     ("module_rag.llm_client", "is_available"): [],
-    ("module_rag.llm_client", "chat"): ["messages", "temperature"],
+    ("module_rag.llm_client", "chat"): ["messages", "temperature", "response_format"],
     ("module_rag.guardrails", "has_enough_context"): ["context"],
     ("module_rag.guardrails", "validate_citations"): ["answer", "context"],
     ("module_rag.engine", "answer_user_query"): ["query", "retrieved_context", "chat_history"],
@@ -67,8 +68,12 @@ HEAVY = ["chromadb", "sentence_transformers", "ollama", "pypdf", "docx", "pytess
          "PIL", "apscheduler", "plyer", "watchdog", "networkx", "dateparser"]
 
 
-def _fake_chat(messages, temperature=0.0):
+def _fake_chat(messages, temperature=0.0, *, response_format=None):
     """Stand-in for llm_client.chat: cites the first SOURCE in the prompt."""
+    from module_rag.pipeline import ROUTING_PROMPT
+
+    if messages[0]["content"] == ROUTING_PROMPT:
+        return json.dumps({"route": "notes", "text": messages[-1]["content"]})
     match = re.search(r"^SOURCE \[([^\]\n]+)\]", messages[-1]["content"], flags=re.MULTILINE)
     return f"Mock answer [{match.group(1)}]." if match else "I couldn't find that in your notes."
 
