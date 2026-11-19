@@ -7,9 +7,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# Runtime data and local models (never commit; models are fetched once)
+# Runtime data (never commit). models/ IS committed so clones work offline.
 data/
-models/
 
 # OS
 .DS_Store

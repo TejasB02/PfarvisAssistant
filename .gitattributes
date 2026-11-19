@@ -1,0 +1,2 @@
+# Ship the embedding model byte-for-byte (no line-ending conversion).
+models/** -text

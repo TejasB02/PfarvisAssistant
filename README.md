@@ -257,13 +257,11 @@ All datetimes are naive local time, and they stay `datetime` objects inside dict
    - macOS: `brew install ollama`.
    - Linux: use the official install script from the Ollama website.
 
-4. **Embedding model.** This is the only step that downloads into the project:
+4. **Embedding model.** Already included in the repo at `models/all-MiniLM-L6-v2/`, so a fresh clone works offline with no download. Only if that folder is missing or damaged, re-fetch it (the only step that downloads into the project):
 
    ```
-   python scripts/prefetch_models.py
+   python scripts/prefetch_models.py --force
    ```
-
-   It saves the model to `models/all-MiniLM-L6-v2/` and prints the next command.
 
 5. **Local LLM.** The default is `llama3`; override it with the `OLLAMA_MODEL` environment variable.
 
