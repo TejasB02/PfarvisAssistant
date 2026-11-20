@@ -12,7 +12,7 @@ A manager's notes live everywhere: text files, Markdown, PDFs, Word documents an
 - **Answers questions** in a chat, with follow-ups like *"Which client?"* and *"Is it virtual or in person?"*, and cites the `[filename]` behind every answer.
 - **Raises reminders** such as *"You have a call with the clients at 4pm today"*.
 
-It never invents an answer. If the notes don't contain it, it replies **"I couldn't find that in your notes."**
+The local LLM uses conversation history to decide when to search notes, ask for clarification, or explain that a request is outside its scope. Answers based on notes include expandable source references.
 
 ### Nothing leaves the machine
 
@@ -37,6 +37,29 @@ The only script that ever touches the internet is `scripts/prefetch_models.py`, 
 py -3.11 -m venv .venv            # macOS/Linux: python3.11 -m venv .venv
 .venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
+```
+  sample_notes/   (config.NOTE_DIR: .txt .md .pdf .docx .png .jpg .jpeg)
+       |
+       v
+  +-----------------------------+
+  | module_ingest    (Person 1) |   scan_and_parse() -> list[dict]  (== asdict(NoteItem))
+  +-----------------------------+
+       |  store.add(notes)                notes also feed reminders (Person 4)
+       v
+  +-----------------------------+  all_notes()  +-------------------------------+
+  | module_storage   (Person 2) | ------------> | module_ui/notifier (Person 4) |
+  | NotesStore: Chroma + graph  |               | every 30 s: any event due?    |
+  +-----------------------------+               | -> desktop popup + queue      |
+       |                                        +-------------------------------+
+       |  hybrid_search() -> list[ContextItem]          |  pop_pending_reminders()
+       v                                                v
+  +-----------------------------+  AnswerDict   +-------------------------------+
+  | module_rag       (Person 3) | ------------> | module_ui/ui_app   (Person 4) |
+  | pipeline.ask -> guardrails  |               | Streamlit chat + sidebar      |
+  | -> Ollama at 127.0.0.1      | <------------ | reminder card "Add to chat"   |
+  +-----------------------------+   question,   +-------------------------------+
+                                    history,
+                                    pinned ids
 ```
 
 Then install the two local programs:
@@ -176,7 +199,54 @@ Editors save in bursts, so changes are debounced (about 1 s per file). Changes m
 ---
 
 ## Project layout
+## One-time setup (online)
 
+Clone the submission branch and run the setup from the repository root. These commands use Python 3.12, the version tested on macOS.
+
+**macOS or Linux**
+
+```sh
+python3.12 -m venv .venv
+source .venv/bin/activate
+```
+
+**Windows PowerShell**
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+Install Ollama for your operating system and start it. Run the following in the activated environment:
+
+```sh
+python -m pip install -r requirements.txt
+ollama pull llama3.1:8b
+python scripts/prefetch_models.py
+```
+
+The prefetch script installs MiniLM into `models/all-MiniLM-L6-v2/`. The demo uses `llama3.1:8b`, which you select explicitly at launch. The shared application default is `llama3`.
+
+**Optional voice input.** Download the English Whisper model to its expected local folder:
+
+```sh
+python -c "from huggingface_hub import snapshot_download; snapshot_download('openai/whisper-tiny.en', local_dir='models/whisper-tiny.en', allow_patterns=['*.json', '*.safetensors', 'merges.txt', 'vocab.txt'])"
+```
+
+**Optional image OCR.** Install the local Tesseract binary to search for text in images.
+
+- Windows uses `winget install UB-Mannheim.TesseractOCR`. Add the installation to PATH or set `TESSERACT_CMD` to the full executable path.
+- macOS uses `brew install tesseract`.
+- Ubuntu uses `sudo apt install tesseract-ocr`.
+
+## Run offline
+
+Start Ollama if it is stopped. If your installation does not launch it automatically, run `ollama serve` in a separate terminal. Launch Streamlit from the repo root with the environment activated.
+
+**macOS or Linux**
+
+```sh
+OLLAMA_MODEL=llama3.1:8b python -m streamlit run app.py
 ```
 app.py                  Entry point: streamlit run app.py
 pipeline.py             Initial indexing + live sync; python pipeline.py runs it without the UI
@@ -247,6 +317,19 @@ Everything is set in `config.py` and can be overridden with environment variable
 
 With the sample notes and Ollama running:
 
+**Windows PowerShell**
+
+```powershell
+$env:OLLAMA_MODEL = "llama3.1:8b"
+python -m streamlit run app.py
+```
+
+Open [Pfarvis Assistant](http://127.0.0.1:8501). The app indexes `sample_notes/` by default. Set `NOTE_DIR` before launch to use another folder.
+
+## Demo conversation
+
+Type a question or click **Voice** beside the text field and grant browser microphone access. Record a short question, review or edit the transcript in the text field, and press **Send**. Expand the references beneath an answer to read the supporting notes.
+
 1. "When is my call with the clients?" → 4pm today `[call_prep.txt]`
 2. "Which client?" → Quillmont Systems `[account_overview.md]`. The link comes from the shared `#q3-rollout` tag.
 3. "Is it virtual or in person?" → virtual `[untitled 3.txt]`
@@ -300,6 +383,11 @@ python -m pytest -q
 - [ ] `ollama list` shows `llama3`
 - [ ] Tesseract is installed (or `TESSERACT_CMD` is set)
 - [ ] `OLLAMA_HOST` is not set to `0.0.0.0` in your shell
+- [ ] `python scripts/prefetch_models.py` ran, and `models/all-MiniLM-L6-v2/config.json` exists
+- [ ] `ollama list` shows `llama3.1:8b`, and the launch command selects it
+- [ ] If demoing voice, `models/whisper-tiny.en/` is present and browser microphone permission works
+- [ ] If demoing image OCR, `tesseract --version` works or `TESSERACT_CMD` is set
+- [ ] `OLLAMA_HOST` is not set to `0.0.0.0` in your shell, so Ollama stays on 127.0.0.1
 - [ ] `python -m pytest -q` passes
 - [ ] Turn off Wi-Fi and unplug Ethernet
 - [ ] Restart `streamlit run app.py`, ask "When is my call with the clients?", and confirm it answers with a `[filename]` citation

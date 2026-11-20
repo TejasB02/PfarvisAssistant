@@ -8,6 +8,7 @@ from pathlib import Path
 import streamlit as st
 
 from module_ui.chat_service import ChatService, Message
+from module_ui.voice import SAMPLE_RATE, transcribe
 
 log = logging.getLogger(__name__)
 
@@ -118,7 +119,26 @@ def main(
                             if source.excerpt:
                                 st.text(source.excerpt)
 
-    prompt = st.chat_input("Message Pfarvis Assistant")
+    message_column, voice_column = st.columns([5, 1], vertical_alignment="center")
+    with voice_column.popover("Voice", icon=":material/mic:"):
+        st.caption("Record your question, then review the text before sending.")
+        recording = st.audio_input("Record question", sample_rate=SAMPLE_RATE)
+        if recording and recording.file_id != st.session_state.get("transcribed_recording"):
+            st.session_state.transcribed_recording = recording.file_id
+            try:
+                with st.spinner("Transcribing locally…"):
+                    transcript = transcribe(recording.getvalue())
+                if transcript:
+                    st.session_state["query_input"] = transcript
+                else:
+                    st.warning("No speech detected. Try recording again.")
+            except FileNotFoundError:
+                st.error("The local Whisper model is missing. Voice input needs the model installed.")
+            except Exception:
+                log.exception("Could not transcribe the recording")
+                st.error("Could not transcribe the recording. Please try again.")
+
+    prompt = message_column.chat_input("Message Pfarvis Assistant", key="query_input")
 
     if prompt and prompt.strip():
         welcome.empty()
