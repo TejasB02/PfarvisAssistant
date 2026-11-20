@@ -61,7 +61,6 @@ def render(store: NotesStore, notes: list[dict]) -> None:
     main(
         RagChatService(store),
         status=status,
-        render_notes=partial(ui_app.render_sidebar, store, notes),
         render_reminders=partial(ui_app.reminder_panel, add_reminder_to_chat),
     )
 

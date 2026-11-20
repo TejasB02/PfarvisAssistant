@@ -13,7 +13,7 @@ A manager's notes are scattered across cluttered folders: text files, Markdown, 
 - It **answers questions** in a Streamlit chat, including follow-ups like *"Which client?"* and *"Is it virtual or in person?"*.
 - It **raises reminders** such as *"You have a call with the clients at 4pm today"*.
 
-It never invents an answer. If the notes don't contain it, it replies **"I couldn't find that in your notes."**
+The local LLM uses conversation history to decide when to search notes, ask for clarification, or explain that a request is outside its scope. Answers based on notes include expandable source references.
 
 **Nothing leaves the machine.** The local services it uses:
 
@@ -23,11 +23,10 @@ It never invents an answer. If the notes don't contain it, it replies **"I could
 | Embeddings | `all-MiniLM-L6-v2`, loaded from `models/` |
 | Vector DB | ChromaDB on disk in `data/`, telemetry off |
 | OCR | Local Tesseract binary |
+| Voice | Whisper Tiny English, loaded from `models/whisper-tiny.en/` |
 | UI | Streamlit bound to `127.0.0.1`, usage stats off |
 
-The only script that ever touches the internet is `scripts/prefetch_models.py`. You run it once, before going offline.
-
-> **Status: scaffold.** Every module is a runnable stub that returns mock data with the final signatures, so the app already runs end to end. Each person replaces their stubs; the contracts stay put.
+Install the dependencies and download the models once before going offline.
 
 ---
 
@@ -40,7 +39,7 @@ The only script that ever touches the internet is `scripts/prefetch_models.py`. 
   +-----------------------------+
   | module_ingest    (Person 1) |   scan_and_parse() -> list[dict]  (== asdict(NoteItem))
   +-----------------------------+
-       |  store.add(notes)                notes also feed the sidebar (Person 4)
+       |  store.add(notes)                notes also feed reminders (Person 4)
        v
   +-----------------------------+  all_notes()  +-------------------------------+
   | module_storage   (Person 2) | ------------> | module_ui/notifier (Person 4) |
@@ -237,61 +236,75 @@ All datetimes are naive local time, and they stay `datetime` objects inside dict
 
 ---
 
-## One-time setup (online, before the demo)
+## One-time setup (online)
 
-1. **Python 3.11 virtual environment.**
+Clone the submission branch and run the setup from the repository root. These commands use Python 3.12, the version tested on macOS.
 
-   ```
-   py -3.11 -m venv .venv            # macOS/Linux: python3.11 -m venv .venv
-   .venv\Scripts\activate            # macOS/Linux: source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
+**macOS or Linux**
 
-2. **Tesseract (OCR binary).**
-   - Windows: `winget install UB-Mannheim.TesseractOCR`. Then add it to PATH, or set `TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe`.
-   - macOS: `brew install tesseract`.
-   - Ubuntu: `sudo apt install tesseract-ocr`.
-
-3. **Ollama.**
-   - Windows: `winget install Ollama.Ollama`.
-   - macOS: `brew install ollama`.
-   - Linux: use the official install script from the Ollama website.
-
-4. **Embedding model.** This is the only step that downloads into the project:
-
-   ```
-   python scripts/prefetch_models.py
-   ```
-
-   It saves the model to `models/all-MiniLM-L6-v2/` and prints the next command.
-
-5. **Local LLM.** The default is `llama3`; override it with the `OLLAMA_MODEL` environment variable.
-
-   ```
-   ollama pull llama3
-   ```
-
-## Run (offline)
-
-```
-ollama serve              # skip if the Ollama app is already running
-streamlit run app.py      # from the project root
+```sh
+python3.12 -m venv .venv
+source .venv/bin/activate
 ```
 
-Open **http://localhost:8501** (or http://127.0.0.1:8501) to use the Pfarvis Assistant interface with your local notes. Streamlit listens on 127.0.0.1 only.
+**Windows PowerShell**
 
-To use your own notes, set `NOTE_DIR`, for example `set NOTE_DIR=C:\Users\me\Documents\notes` on Windows or `export NOTE_DIR=~/notes` on macOS/Linux.
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
 
-**Demo conversation.** This needs the real modules; with the stubs, you get mock replies.
+Install Ollama for your operating system and start it. Run the following in the activated environment:
+
+```sh
+python -m pip install -r requirements.txt
+ollama pull llama3.1:8b
+python scripts/prefetch_models.py
+```
+
+The prefetch script installs MiniLM into `models/all-MiniLM-L6-v2/`. The demo uses `llama3.1:8b`, which you select explicitly at launch. The shared application default is `llama3`.
+
+**Optional voice input.** Download the English Whisper model to its expected local folder:
+
+```sh
+python -c "from huggingface_hub import snapshot_download; snapshot_download('openai/whisper-tiny.en', local_dir='models/whisper-tiny.en', allow_patterns=['*.json', '*.safetensors', 'merges.txt', 'vocab.txt'])"
+```
+
+**Optional image OCR.** Install the local Tesseract binary to search for text in images.
+
+- Windows uses `winget install UB-Mannheim.TesseractOCR`. Add the installation to PATH or set `TESSERACT_CMD` to the full executable path.
+- macOS uses `brew install tesseract`.
+- Ubuntu uses `sudo apt install tesseract-ocr`.
+
+## Run offline
+
+Start Ollama if it is stopped. If your installation does not launch it automatically, run `ollama serve` in a separate terminal. Launch Streamlit from the repo root with the environment activated.
+
+**macOS or Linux**
+
+```sh
+OLLAMA_MODEL=llama3.1:8b python -m streamlit run app.py
+```
+
+**Windows PowerShell**
+
+```powershell
+$env:OLLAMA_MODEL = "llama3.1:8b"
+python -m streamlit run app.py
+```
+
+Open [Pfarvis Assistant](http://127.0.0.1:8501). The app indexes `sample_notes/` by default. Set `NOTE_DIR` before launch to use another folder.
+
+## Demo conversation
+
+Type a question or click **Voice** beside the text field and grant browser microphone access. Record a short question, review or edit the transcript in the text field, and press **Send**. Expand the references beneath an answer to read the supporting notes.
 
 1. "When is my call with the clients?" -> 4pm today `[call_prep.txt]`
 2. "Which client?" -> Quillmont Systems `[account_overview.md]`. The link comes from the shared `#q3-rollout` tag.
 3. "Is it virtual or in person?" -> virtual `[untitled 3.txt]`
 4. "What is our parking reimbursement policy?" -> *I couldn't find that in your notes.* No note mentions it.
 
-**Reminders.** With the stubs, a mock note is due 5 minutes after start-up, so a reminder appears within 30 seconds.
-
-With the real parser, "4pm today" resolves against the file's modified time. On demo day, re-date `call_prep.txt` and run the demo after 15:45, or raise `REMINDER_LEAD_MINUTES`. To re-date the file:
+**Reminders.** "4pm today" resolves against the file's modified time. On demo day, re-date `call_prep.txt` and run the demo after 15:45, or raise `REMINDER_LEAD_MINUTES`. To re-date the file:
 
 - Windows: `(Get-Item "sample_notes\meetings\2026-11\call_prep.txt").LastWriteTime = Get-Date`
 - macOS/Linux: `touch "sample_notes/meetings/2026-11/call_prep.txt"`
@@ -332,8 +345,9 @@ python -m pytest -q
 
 - [ ] `pip install -r requirements.txt` finished inside `.venv`
 - [ ] `python scripts/prefetch_models.py` ran, and `models/all-MiniLM-L6-v2/config.json` exists
-- [ ] `ollama pull llama3` ran, and `ollama list` shows the model
-- [ ] `tesseract --version` works, or `TESSERACT_CMD` is set
+- [ ] `ollama list` shows `llama3.1:8b`, and the launch command selects it
+- [ ] If demoing voice, `models/whisper-tiny.en/` is present and browser microphone permission works
+- [ ] If demoing image OCR, `tesseract --version` works or `TESSERACT_CMD` is set
 - [ ] `OLLAMA_HOST` is not set to `0.0.0.0` in your shell, so Ollama stays on 127.0.0.1
 - [ ] `python -m pytest -q` passes
 - [ ] Turn Wi-Fi off and unplug Ethernet
