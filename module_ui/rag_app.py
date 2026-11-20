@@ -10,7 +10,7 @@ import streamlit as st
 from contracts import fallback_answer
 from module_ui.app import add_messages, main
 from module_ui.chat_service import ChatReply, Message, SourceReference
-from module_ingest.parser import scan_and_parse
+import pipeline as ingest_pipeline
 from module_rag import llm_client, pipeline
 from module_storage.store import NotesStore
 from module_ui import notifier, ui_app
@@ -41,11 +41,11 @@ class RagChatService:
 
 @st.cache_resource(show_spinner="Indexing local notes…")
 def load_store() -> tuple[NotesStore, list[dict]]:
-    notes = scan_and_parse(config.NOTE_DIR)
-    store = NotesStore()
-    store.add(notes)
+    # Initial full index, then a background watcher keeps the vector DB in sync
+    # with every create / edit / delete under config.NOTE_DIR.
+    store = ingest_pipeline.run_ingestion_pipeline(config.NOTE_DIR, store=NotesStore(), live_sync=True)
     notifier.start_scheduler(store.all_notes)
-    return store, notes
+    return store, store.all_notes()
 
 
 def add_reminder_to_chat(reminder: dict) -> None:
@@ -61,10 +61,12 @@ def render(store: NotesStore, notes: list[dict]) -> None:
     main(
         RagChatService(store),
         status=status,
-        render_notes=partial(ui_app.render_sidebar, store, notes),
         render_reminders=partial(ui_app.reminder_panel, add_reminder_to_chat),
     )
 
 
 def run() -> None:
-    render(*load_store())
+    store, _ = load_store()
+    # Re-read on every rerun so the sidebar reflects live-synced changes.
+    notes = sorted(store.all_notes(), key=lambda n: n["filepath"])
+    render(store, notes)
