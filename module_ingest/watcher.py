@@ -60,7 +60,11 @@ def watch(
     Edge cases:
         - Editors fire several events per save: debounce (~1 s) per path.
         - Ignore unsupported extensions, temp files ("~$*", "*.swp", ".*").
-        - parse_file returning None -> do not call on_change.
+        - parse_file returning None -> do not call on_change; if the file was
+          indexed before (e.g. it was emptied), call on_delete so its stale
+          vector disappears.
+        - A whole folder deleted / moved out -> on_delete for every file the
+          watcher knew under it; a folder moved in -> on_change for its files.
         - Never let an exception in a callback kill the observer thread.
         - Callbacks run on the watcher thread: they must not touch
           st.session_state.
@@ -75,6 +79,11 @@ def watch(
 
     lock = threading.Lock()
     timers: dict[Path, threading.Timer] = {}
+    # Every supported file currently under root. Folder-level events carry no
+    # per-file paths, so this is how a deleted folder maps back to note ids.
+    known: set[Path] = {
+        p.resolve() for p in root.rglob("*") if p.is_file() and not _is_ignored(p.resolve(), root)
+    }
 
     def _cancel_timer(target: Path) -> None:
         with lock:
@@ -87,6 +96,8 @@ def watch(
             timers.pop(target, None)
         if not target.is_file():
             return
+        with lock:
+            known.add(target)
         try:
             note = parser.parse_file(target)
         except Exception as exc:  # noqa: BLE001
@@ -94,6 +105,8 @@ def watch(
             return
 
         if note is None:
+            # Emptied or unreadable now: drop any earlier version of it.
+            _emit_delete(target)
             return
 
         try:
@@ -114,16 +127,35 @@ def watch(
             timers[target] = timer
             timer.start()
 
+    def _emit_delete(target: Path) -> None:
+        try:
+            on_delete(make_note_id(target))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Watcher on_delete callback error for %s: %s", target, exc)
+
     def _handle_delete(raw_path: str | bytes) -> None:
         target = Path(str(raw_path)).expanduser().resolve()
         if _is_ignored(target, root):
             return
         _cancel_timer(target)
-        note_id = make_note_id(target)
-        try:
-            on_delete(note_id)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Watcher on_delete callback error for %s: %s", target, exc)
+        with lock:
+            known.discard(target)
+        _emit_delete(target)
+
+    def _handle_dir_delete(raw_path: str | bytes) -> None:
+        folder = Path(str(raw_path)).expanduser().resolve()
+        with lock:
+            gone = [p for p in known if p.is_relative_to(folder)]
+        for target in gone:
+            _handle_delete(target)
+
+    def _handle_dir_added(raw_path: str | bytes) -> None:
+        folder = Path(str(raw_path)).expanduser().resolve()
+        if not folder.is_dir() or not folder.is_relative_to(root):
+            return
+        for path in folder.rglob("*"):
+            if path.is_file():
+                _schedule_change(path)
 
     class _NotesEventHandler(FileSystemEventHandler):
         def on_created(self, event: FileSystemEvent) -> None:
@@ -137,9 +169,15 @@ def watch(
         def on_deleted(self, event: FileSystemEvent) -> None:
             if not event.is_directory:
                 _handle_delete(event.src_path)
+            # Windows reports a deleted folder as a plain (non-directory) event,
+            # so always sweep anything the watcher knew under this path.
+            _handle_dir_delete(event.src_path)
 
         def on_moved(self, event: FileSystemEvent) -> None:
-            if not event.is_directory:
+            if event.is_directory:
+                _handle_dir_delete(event.src_path)
+                _handle_dir_added(event.dest_path)
+            else:
                 _handle_delete(event.src_path)
                 _schedule_change(event.dest_path)
 
